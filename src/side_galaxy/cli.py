@@ -1,4 +1,7 @@
 import argparse
+import io
+import stat
+import zipfile
 import json
 import os
 from pathlib import Path
@@ -26,6 +29,16 @@ def main(argv=None):
     sub.add_parser("boards")
     sub.add_parser("profiles")
     sub.add_parser("batches")
+    sub.add_parser("artifacts")
+    pack = sub.add_parser("pack")
+    pack.add_argument("directory")
+    pack.add_argument("--output", required=True)
+    upload = sub.add_parser("artifact-upload", aliases=["upload"])
+    upload.add_argument("bundle")
+    download = sub.add_parser("output")
+    download.add_argument("run")
+    download.add_argument("index", type=int)
+    download.add_argument("--output", required=True)
     for name in ("preflight", "submit"):
         p = sub.add_parser(name)
         p.add_argument("plan", help="JSON file or - for stdin")
@@ -48,6 +61,35 @@ def main(argv=None):
     mcp.add_argument("--allow-writes", action="store_true")
     args = parser.parse_args(argv)
     try:
+        if args.command == "pack":
+            from .workload_runner import validate_bundle, MAX_BUNDLE, MAX_EXPANDED
+            root = Path(args.directory).resolve(strict=True)
+            if not root.is_dir(): raise ValueError("Pack requires an experiment directory")
+            target = Path(args.output).resolve()
+            if target.exists(): raise ValueError("Output already exists")
+            ignored = {".git", ".env", ".ssh", ".aws", ".venv", "node_modules", "__pycache__", ".data", ".cache"}
+            buffer = io.BytesIO()
+            count, expanded = 0, 0
+            with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+                for current, dirs, files in os.walk(root, followlinks=False):
+                    dirs[:] = sorted(d for d in dirs if d not in ignored and not Path(current, d).is_symlink())
+                    for name in sorted(files):
+                        path = Path(current, name)
+                        if name in ignored or name.startswith(".env.") or name.endswith((".pem", ".key")): continue
+                        if path.is_symlink(): raise ValueError("Symlinks are not supported in experiment packages")
+                        if path.resolve() == target: continue
+                        info = path.lstat()
+                        if not stat.S_ISREG(info.st_mode): raise ValueError("Only regular experiment files can be packed")
+                        expanded += info.st_size
+                        if expanded > MAX_EXPANDED or count >= 512: raise ValueError("Experiment exceeds expanded size or file limits")
+                        archive.write(path, path.relative_to(root).as_posix())
+                        count += 1
+                        if buffer.tell() > MAX_BUNDLE or count > 512: raise ValueError("Experiment package exceeds limits")
+            data = buffer.getvalue()
+            manifest = validate_bundle(data)
+            with target.open("xb") as stream: stream.write(data)
+            output({"packed": True, "files": count, "size": len(data), "manifest": manifest})
+            return
         if args.command == "serve":
             if args.demo and args.host not in ("127.0.0.1", "::1", "localhost"):
                 parser.error("--demo must bind to loopback")
@@ -92,8 +134,17 @@ def main(argv=None):
             return
         client = Client(args.server)
         try:
-            if args.command in ("boards", "profiles", "batches"):
+            if args.command in ("boards", "profiles", "batches", "artifacts"):
                 output(client.request("GET", "/api/" + ("catalog" if args.command == "profiles" else args.command)))
+            elif args.command in ("artifact-upload", "upload"):
+                from .workload_runner import MAX_BUNDLE, validate_bundle
+                with Path(args.bundle).open("rb") as stream: data = stream.read(MAX_BUNDLE + 1)
+                validate_bundle(data)
+                output(client.upload_artifact(data))
+            elif args.command == "output":
+                data = client.download_output(args.run, args.index)
+                with Path(args.output).open("xb") as stream: stream.write(data)
+                output({"saved": True, "size": len(data)})
             elif args.command in ("preflight", "submit"):
                 text = sys.stdin.read() if args.plan == "-" else Path(args.plan).read_text()
                 plan = Plan.model_validate_json(text)

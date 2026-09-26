@@ -1,5 +1,6 @@
 """Run against an explicitly started loopback demo server; creates synthetic runs only."""
 import asyncio
+import base64
 import json
 import os
 from pathlib import Path
@@ -28,9 +29,17 @@ async def protocol():
                 await session.initialize()
                 names = {tool.name for tool in (await session.list_tools()).tools}
                 assert ('run_experiment' in names) == writes
+                assert ('upload_artifact' in names) == writes
+                assert {'list_artifacts', 'get_output'} <= names
                 assert not (await session.call_tool('list_boards')).isError
                 if writes:
-                    plan={'boards':['pi5-edge'],'duration_seconds':1}
+                    with tempfile.TemporaryDirectory() as root:
+                        package = Path(root) / 'example.zip'
+                        cli('pack', 'examples/hello-workload', '--output', str(package))
+                        upload = await session.call_tool('upload_artifact', {'bundle_base64': base64.b64encode(package.read_bytes()).decode()})
+                        assert not upload.isError, upload
+                        artifact = json.loads(upload.content[0].text)
+                    plan={'boards':['pi5-edge'],'duration_seconds':1,'template':'workload','artifact_sha256':artifact['sha256'],'interference_cpus':[]}
                     check = await session.call_tool('preflight', {'plan':plan})
                     assert not check.isError
                     started = await session.call_tool('run_experiment', {'plan':plan,'idempotency_key':'mcp-'+str(uuid.uuid4())})
@@ -57,7 +66,11 @@ def remote_agent():
             for _ in range(40):
                 if any(b['id']==record['board_id'] and b['status']=='ready' for b in cli('boards')): break
                 time.sleep(.2)
-            plan={'boards':[record['board_id']],'duration_seconds':1}
+            package = Path(root) / 'example.zip'
+            cli('pack', 'examples/hello-workload', '--output', str(package))
+            artifact = cli('artifact-upload', str(package))
+            assert any(item['sha256'] == artifact['sha256'] for item in cli('artifacts'))
+            plan={'boards':[record['board_id']],'duration_seconds':1,'template':'workload','artifact_sha256':artifact['sha256'],'interference_cpus':[],'arguments':['--label','transport-check'],'environment':{'GALAXY_MESSAGE':'API to agent'}}
             assert client.request('POST','/api/preflight',plan)['valid']
             batch=client.request('POST','/api/batches',plan,'agent-'+str(uuid.uuid4()))
             for _ in range(40):
@@ -65,6 +78,8 @@ def remote_agent():
                 if final['runs'][0]['state']=='succeeded': break
                 time.sleep(.2)
             assert final['runs'][0]['state']=='succeeded', final
+            assert final['runs'][0]['result']['code_executed'] is False
+            assert final['runs'][0]['result']['artifact_sha256'] == artifact['sha256']
         finally:
             process.terminate()
             process.wait(timeout=20)

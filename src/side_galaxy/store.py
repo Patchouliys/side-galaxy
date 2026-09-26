@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import json
 import secrets
@@ -8,6 +9,8 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from .models import Plan
+from .artifacts import Artifacts
+from .workload_runner import MAX_OUTPUTS
 
 ACTIVE = ("queued", "running", "cancelling")
 
@@ -27,6 +30,7 @@ class Conflict(ValueError):
 class Store:
     def __init__(self, path):
         self.path = str(path)
+        self.artifacts = Artifacts(Path(path).parent / "artifacts")
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         with self.tx() as db:
             db.executescript("""
@@ -93,8 +97,10 @@ class Store:
         rows = db.execute("""SELECT r.*, b.seen, ba.plan FROM runs r JOIN boards b ON b.id=r.board_id
                              JOIN batches ba ON ba.id=r.batch_id WHERE r.state IN ('queued','running','cancelling')""").fetchall()
         for row in rows:
-            duration = json.loads(row["plan"])["duration_seconds"]
-            if now - row["seen"] > 30 or (row["started"] and now - row["started"] > duration + 45):
+            plan = json.loads(row["plan"])
+            duration = plan["duration_seconds"]
+            grace = 180 if plan["template"] == "workload" else 45
+            if now - row["seen"] > 30 or (row["started"] and now - row["started"] > duration + grace):
                 state = "failed" if row["state"] == "queued" else "lost"
                 db.execute("UPDATE runs SET state=?,finished=?,result=? WHERE id=?",
                            (state, now, canonical({"error": "agent heartbeat or execution deadline expired"}), row["id"]))
@@ -117,6 +123,9 @@ class Store:
 
     def _check(self, db, plan):
         errors, targets = [], []
+        if plan.artifact_sha256:
+            try: self.artifacts.get(plan.artifact_sha256)
+            except KeyError: errors.append({"board_id": None, "reasons": ["artifact unavailable; upload again"]})
         for board_id in plan.boards:
             b = db.execute("SELECT * FROM boards WHERE id=?", (board_id,)).fetchone()
             reasons = []
@@ -134,6 +143,8 @@ class Store:
             if plan.template not in desc.get("templates", []): reasons.append("template unsupported")
             caps = desc.get("capabilities", [])
             if "cpu-affinity" not in caps: reasons.append("CPU affinity unsupported")
+            if plan.memory_mib is None and desc.get("memory_limit_required"):
+                reasons.append("module requires a memory limit")
             if plan.memory_mib is not None and ("memory-limit" not in caps or plan.memory_mib > desc.get("memory_mib", 0)):
                 reasons.append("memory limit unsupported or exceeds available budget")
             if plan.bandwidth_percent is not None and "bandwidth-limit" not in caps:
@@ -184,7 +195,29 @@ class Store:
     def _run(row):
         item = dict(row)
         item["result"] = json.loads(item["result"]) if item["result"] else None
+        if item["result"] and isinstance(item["result"].get("outputs"), list):
+            item["result"]["outputs"] = [{k: v for k, v in output.items() if k != "data_base64"}
+                                         for output in item["result"]["outputs"] if isinstance(output, dict)]
         return item
+
+    def artifact_for_agent(self, board_id, sha):
+        with self.tx() as db:
+            row = db.execute("SELECT b.plan FROM runs r JOIN batches b ON b.id=r.batch_id WHERE r.board_id=? AND r.state IN ('running','cancelling')", (board_id,)).fetchone()
+            if not row or json.loads(row[0]).get("artifact_sha256") != sha: raise KeyError(sha)
+        return self.artifacts.get(sha)
+
+    def output_file(self, run_id, index):
+        with self.tx() as db:
+            row = db.execute("SELECT result FROM runs WHERE id=?", (run_id,)).fetchone()
+        try:
+            if index < 0 or not row or not row[0]: raise ValueError()
+            item = json.loads(row[0])["outputs"][index]
+            if len(item["data_base64"]) > (MAX_OUTPUTS + 2) // 3 * 4: raise ValueError()
+            content = base64.b64decode(item["data_base64"], validate=True)
+            if len(content) > MAX_OUTPUTS: raise ValueError()
+            if len(content) != item["size"] or hashlib.sha256(content).hexdigest() != item["sha256"]: raise ValueError()
+            return item, content
+        except (KeyError, ValueError, IndexError, TypeError): raise KeyError(run_id) from None
 
     def batches(self):
         with self.tx() as db:

@@ -18,7 +18,7 @@ uv run sg batch BATCH_ID
 uv run sg cancel BATCH_ID
 ```
 
-Reuse the key when retrying the same submission; choose a new key for a new experiment. Preflight does not reserve boards, and submission repeats checks atomically. Each board has one experiment lease, with victim/interferer roles supported within an experiment. Synchronized starts across boards are not guaranteed. The batch list shows the most recent 100 batches; older records remain accessible by ID.
+Reuse the key when retrying the same submission; choose a new key for a new experiment. Preflight does not reserve boards, and submission repeats checks atomically. Each board has one experiment lease. Built-in experiments support victim/interferer roles internally; custom bundles organize their own workloads. Synchronized starts across boards are not guaranteed. The batch list shows the most recent 100 batches; older records remain accessible by ID.
 
 ## Single Server
 
@@ -70,10 +70,12 @@ Configure any compatible MCP stdio client, with command pointing to the installe
 {"mcpServers":{"side-galaxy":{"command":"sg","args":["mcp"],"env":{"SG_SERVER":"https://galaxy.example.com","SG_TOKEN":"SUPPLY_READ_TOKEN_VIA_SECRET_STORAGE"}}}}
 ```
 
-Default tools are list_boards, list_profiles, preflight, and get_batch. If the task explicitly authorizes AI to operate experiment devices, change to `args:["mcp","--allow-writes"]` and use an operator token. This adds run_experiment, cancel_batch, and reload_module. Enabling MCP write tools does not bypass server authorization, admission, or version checks. The token placeholder cannot establish a connection as written.
+Default tools are list_boards, list_profiles, list_artifacts, preflight, get_batch, and get_output. If the task explicitly authorizes AI to operate experiment devices, change to `args:["mcp","--allow-writes"]` and use an operator token. This adds upload_artifact, run_experiment, cancel_batch, and reload_module. Enabling MCP write tools does not bypass server authorization, admission, or version checks. The token placeholder cannot establish a connection as written.
 
 ## Operational Boundaries
 
 Deployment uses one uvicorn process, a single SQLite writer, and one server. A heartbeat missing for 30 seconds or a task exceeding its deadline triggers lost/quarantine state. Experiments with unknown state are not automatically rerun. After disconnection, the agent attempts to stop local experiments and submits a terminal state when the network returns. If the server has already marked a run lost, that state remains until manual verification and recovery.
 
 Stop the service or use the SQLite backup API when backing up `.data/galaxy.db`; do not copy only the main database file while a WAL is active. Databases, module snapshots, credentials, and experiment outputs should not enter public Git history. Token rotation, offline artifact signatures, complete audit logs, automatic evidence retention, and high availability are currently missing; complete the phased checklist in research.md before production use.
+
+Experiment code is delivered through artifact upload and per-board download; see [workloads.md](workloads.md) for the full workflow. Target images provide Python, compilers, and system dependencies for Linux/KVM guests. Manifest setup steps may install dependencies permitted in the environment, with logs retained on failure. See [kvm-workloads.md](kvm-workloads.md) for additional KVM guest requirements.

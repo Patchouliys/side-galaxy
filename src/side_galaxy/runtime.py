@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import os
@@ -33,7 +34,8 @@ class Modules:
             if not self.override and (not system["module"].replace("_", "").isalnum()):
                 raise ValueError("Use --module-file for trusted external modules")
             code = source.read_bytes()
-            generation = hashlib.sha256(code + json.dumps([board, system], sort_keys=True).encode()).hexdigest()
+            runner_code = Path(__file__).with_name("workload_runner.py").read_bytes()
+            generation = hashlib.sha256(code + runner_code + json.dumps([board, system], sort_keys=True).encode()).hexdigest()
             if not force and generation == getattr(self, "attempted", None): return
             self.attempted = generation
             snapshot = self.root / (generation + ".py")
@@ -42,6 +44,12 @@ class Modules:
                 snapshot.chmod(0o400)
             elif snapshot.read_bytes() != code:
                 raise ValueError("Snapshot integrity mismatch")
+            runner_snapshot = snapshot.with_suffix(".runner.py")
+            if not runner_snapshot.exists():
+                with runner_snapshot.open("xb") as stream: stream.write(runner_code)
+                runner_snapshot.chmod(0o400)
+            elif runner_snapshot.read_bytes() != runner_code:
+                raise ValueError("Runner snapshot integrity mismatch")
             response = subprocess.run([sys.executable, str(snapshot)], input='{"op":"describe"}',
                                       text=True, capture_output=True, timeout=20, check=True)
             data = json.loads(response.stdout)
@@ -56,12 +64,15 @@ class Modules:
 
 
 class Execution:
-    def __init__(self, snapshot, job):
+    def __init__(self, snapshot, job, artifact_path=None):
         self.job = job
         self.output = tempfile.TemporaryFile()
         self.process = subprocess.Popen([sys.executable, str(snapshot)], stdin=subprocess.PIPE,
                                         stdout=self.output, stderr=subprocess.DEVNULL, start_new_session=True)
-        self.process.stdin.write(json.dumps({"op": "run", "plan": job["plan"]}).encode())
+        context = {"op": "run", "plan": job["plan"], "run_id": job.get("id", "standalone")}
+        if artifact_path:
+            context.update(artifact_path=str(Path(artifact_path).resolve()), runner_path=str(snapshot.with_suffix(".runner.py").resolve()))
+        self.process.stdin.write(json.dumps(context).encode())
         self.process.stdin.close()
         self.started = time.monotonic()
         self.stopping = None
@@ -76,9 +87,10 @@ class Execution:
             except ProcessLookupError: pass
 
     def poll(self):
-        if time.monotonic() - self.started > self.job["plan"]["duration_seconds"] + 20:
+        workload = self.job["plan"]["template"] == "workload"
+        if time.monotonic() - self.started > self.job["plan"]["duration_seconds"] + (120 if workload else 20):
             self.stop()
-        if self.stopping and time.monotonic() - self.stopping > 10:
+        if self.stopping and time.monotonic() - self.stopping > (45 if workload else 10):
             self.forced = True
             try: os.killpg(self.process.pid, signal.SIGKILL)
             except ProcessLookupError: pass
@@ -88,16 +100,16 @@ class Execution:
         try: os.killpg(self.process.pid, signal.SIGKILL)
         except ProcessLookupError: pass
         self.output.seek(0)
-        raw = self.output.read(262145)
+        raw = self.output.read(2 * 1024 * 1024 + 1)
         self.output.close()
         try:
-            if len(raw) > 262144: raise ValueError("Oversized result")
+            if len(raw) > 2 * 1024 * 1024: raise ValueError("Oversized result")
             result = json.loads(raw)
             if not isinstance(result, dict): raise ValueError("Result must be an object")
             cleanup = bool(result.get("cleanup_ok", False)) and not self.forced
         except (ValueError, UnicodeDecodeError):
             result, cleanup = {"error": "Module returned no valid result", "exit_code": code}, False
-        if self.cancelled and self.job.get("cleanup_scope") == "process-group" and not self.forced:
+        if not workload and self.cancelled and self.job.get("cleanup_scope") == "process-group" and not self.forced:
             # These modules change only processes, all of which share the killed process group.
             cleanup = True
         result["mode"] = self.job.get("mode", "unknown")
@@ -111,11 +123,13 @@ class Agent:
         self.client, self.board_id, self.modules = client, board_id, modules
         self.execution = None
         self.pending = None
+        self.staging = None
+        self.downloads = ThreadPoolExecutor(max_workers=1, thread_name_prefix="artifact")
         self.reload_ack = 0
         self.reload_requested = 0
 
     def tick(self):
-        if not self.execution and not self.pending:
+        if not self.execution and not self.pending and not self.staging:
             self.modules.reload(force=self.reload_requested > self.reload_ack)
             self.reload_ack = self.reload_requested
         snapshot, desc = self.modules.current
@@ -128,11 +142,23 @@ class Agent:
             return
         job = self.client.poll(self.board_id)
         if self.execution:
-            if not job or job["state"] == "cancelling": self.execution.stop(cancelled=True)
+            if not job or job["id"] != self.execution.job["id"] or job["state"] == "cancelling": self.execution.stop(cancelled=True)
             completed = self.execution.poll()
             if completed:
                 self.pending = (self.execution.job["id"], completed)
                 self.execution = None
+        elif self.staging:
+            staged_snapshot, staged_job, future = self.staging
+            if future.done():
+                self.staging = None
+                try:
+                    artifact_path = future.result()
+                    if not job or job["id"] != staged_job["id"] or job["state"] == "cancelling":
+                        self.pending = (staged_job["id"], Completion(state="cancelled", result={"cleanup_ok": True, "code_executed": False}, module_sha256=staged_job["module_sha256"], cleanup_ok=True))
+                    else:
+                        self.execution = Execution(staged_snapshot, staged_job, artifact_path)
+                except Exception as exc:
+                    self.pending = (staged_job["id"], Completion(state="failed", result={"error": "Artifact staging failed: " + type(exc).__name__, "code_executed": False}, module_sha256=staged_job["module_sha256"], cleanup_ok=True))
         elif job:
             if not job["claimed"] or job["module_sha256"] != desc.module_sha256:
                 self.pending = (job["id"], Completion(state="failed", result={"error": "Unknown or changed execution; inspect before recovery"},
@@ -140,9 +166,19 @@ class Agent:
             else:
                 job["mode"] = desc.mode
                 job["cleanup_scope"] = desc.cleanup_scope
-                self.execution = Execution(snapshot, job)
+                if job["plan"].get("artifact_sha256"):
+                    future = self.downloads.submit(self.client.fetch_artifact, self.board_id, job["plan"]["artifact_sha256"], self.modules.root / "artifacts")
+                    self.staging = (snapshot, job, future)
+                else:
+                    self.execution = Execution(snapshot, job)
 
     def shutdown(self):
+        if self.staging:
+            _, job, future = self.staging
+            future.cancel()
+            self.pending = (job["id"], Completion(state="cancelled", result={"code_executed": False}, module_sha256=job["module_sha256"], cleanup_ok=True))
+            self.staging = None
+        self.downloads.shutdown(wait=False, cancel_futures=True)
         if self.execution:
             self.execution.stop(cancelled=True)
             while (result := self.execution.poll()) is None: time.sleep(.1)
@@ -158,3 +194,6 @@ class LocalClient:
     def heartbeat(self, board, data): return self.store.heartbeat(board, data)
     def poll(self, board): return self.store.poll(board)
     def finish(self, board, run, data): return self.store.finish(board, run, data)
+
+    def fetch_artifact(self, board, sha, root):
+        return self.store.artifact_for_agent(board, sha)

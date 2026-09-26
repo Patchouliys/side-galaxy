@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "name": "Python 参数与结果示例",
+  "description": "接收参数和环境变量，记录运行耗时并回传 JSON。",
+  "setup": [["python3", "prepare.py"]],
+  "run": ["python3", "main.py"],
+  "env": {"EXPERIMENT_LABEL": "baseline"},
+  "outputs": ["results/summary.json"]
+}

@@ -5,7 +5,9 @@ import os
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
+from urllib.parse import quote
+from .workload_runner import MAX_BUNDLE
 from fastapi.staticfiles import StaticFiles
 
 from .models import Completion, Enrollment, Heartbeat, Plan
@@ -58,14 +60,15 @@ def create_app(db_path=".data/galaxy.db", demo=False, token=None, read_token=Non
         origin = request.headers.get("origin")
         if origin and origin != str(request.base_url).rstrip("/"):
             return JSONResponse({"detail": "Cross-origin access denied"}, status_code=403)
+        limit = MAX_BUNDLE if request.url.path == "/api/artifacts" else 3 * 1024 * 1024 if request.url.path.endswith("/finish") else 300000
         length = request.headers.get("content-length", "0")
-        if not length.isdigit() or int(length) > 300000:
+        if not length.isdigit() or int(length) > limit:
             return JSONResponse({"detail": "Request too large"}, status_code=413)
         if request.method in ("POST", "PUT", "PATCH"):
             body = bytearray()
             async for chunk in request.stream():
                 body.extend(chunk)
-                if len(body) > 300000:
+                if len(body) > limit:
                     return JSONResponse({"detail": "Request too large"}, status_code=413)
             request._body = bytes(body)
         response = await call_next(request)
@@ -96,6 +99,28 @@ def create_app(db_path=".data/galaxy.db", demo=False, token=None, read_token=Non
 
     @app.exception_handler(KeyError)
     async def missing(request, exc): return JSONResponse({"detail": "Not found"}, status_code=404)
+
+    @app.post("/api/artifacts", dependencies=[Depends(writer)], status_code=201)
+    async def upload_artifact(request: Request):
+        try: return await asyncio.to_thread(store.artifacts.put, await request.body())
+        except ValueError as exc: raise HTTPException(422, str(exc)) from None
+
+    @app.get("/api/artifacts", dependencies=[Depends(reader)])
+    def artifacts(): return store.artifacts.list()
+
+    @app.get("/api/artifacts/{sha}/download", dependencies=[Depends(reader)])
+    def download_artifact(sha: str):
+        return FileResponse(store.artifacts.get(sha), media_type="application/zip", filename=sha + ".zip")
+
+    @app.get("/api/agent/{board_id}/artifacts/{sha}", dependencies=[Depends(board_auth)])
+    def agent_artifact(board_id: str, sha: str):
+        return FileResponse(store.artifact_for_agent(board_id, sha), media_type="application/zip")
+
+    @app.get("/api/runs/{run_id}/outputs/{index}", dependencies=[Depends(reader)])
+    def download_output(run_id: str, index: int):
+        item, content = store.output_file(run_id, index)
+        name = str(item.get("path", "output")).split("/")[-1]
+        return Response(content, media_type="application/octet-stream", headers={"Content-Disposition": "attachment; filename*=UTF-8''" + quote(name, safe=""), "X-Content-SHA256": item["sha256"]})
 
     @app.get("/healthz")
     def health(): return {"status": "ok", "demo": demo, "version": "0.1.0"}
@@ -144,6 +169,9 @@ def create_app(db_path=".data/galaxy.db", demo=False, token=None, read_token=Non
 
     @app.get("/")
     def index(): return FileResponse(STATIC / "index.html")
+
+    @app.get("/console")
+    def console(): return FileResponse(STATIC / "index.html")
 
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
     return app
