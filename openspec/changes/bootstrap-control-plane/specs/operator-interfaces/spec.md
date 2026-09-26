@@ -54,3 +54,6 @@ The landing page SHALL introduce the platform using the side-view galaxy identit
 - **WHEN** a visitor opens the landing page and selects the console entry point
 - **THEN** a separate board and experiment management page opens with a way to return to the landing page
 
+#### Scenario: Animated galaxy and reduced motion
+- **WHEN** the landing page is visible and the visitor permits animation
+- **THEN** the galaxy displays animated dust and light trails, pauses when the page is hidden, and remains a static, readable visual when reduced motion is preferred

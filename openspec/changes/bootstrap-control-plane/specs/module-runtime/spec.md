@@ -24,7 +24,7 @@ The agent SHALL pin each job's module generation by content digest and probe upd
 
 ### Requirement: Bounded execution
 
-Execution modules SHALL run in independent processes with time limits. Cancellation and timeout SHALL clean up their process groups. Network requests SHALL NOT accept arbitrary shell commands, module source, or module paths.
+Execution modules SHALL run in independent processes with time limits. Cancellation and timeout SHALL clean up their process groups. The management protocol SHALL NOT expose host shell endpoints or accept module source or module paths. Authenticated experiment bundles may declare trusted `setup` and `run` argv arrays within the experiment environment.
 
 #### Scenario: Cancel a workload
 - **WHEN** an operator cancels a running job

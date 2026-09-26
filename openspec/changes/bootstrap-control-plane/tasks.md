@@ -24,7 +24,7 @@
 ## 5. Integration and Publication
 
 - [x] 5.1 Complete integration tests, privacy scanning, usage instructions, and records of physical-target acceptance boundaries.
-- [ ] 5.2 Create and push a public GitHub repository using a generic project commit identity; verify remote visibility and commit metadata.
+- [x] 5.2 Create and push a public GitHub repository using a generic project commit identity; verify remote visibility and commit metadata.
 
 ## 6. Real Experiment Bundle Workflow
 
@@ -36,3 +36,4 @@
 
 - [x] 7.1 Add a separate landing page, animated side-view galaxy, and reduced-motion support; verify the landing page and console entry point in the browser.
 
+- [x] 7.2 Following landing-page feedback, upgrade the galaxy with a layered core, animated dust disk, and light trails; verify browser rendering, reduced-motion preferences, and background suspension.

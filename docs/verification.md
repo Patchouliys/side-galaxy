@@ -25,3 +25,7 @@ Browser checks verified the redesigned console's two-board selection, bundle par
 The code is limited to a single node and tenant. Artifacts are limited to 16 MiB compressed and 64 MiB extracted, stdout/stderr to 64 KiB each, and total outputs to 512 KiB; logs return after the task finishes. Full guest snapshot restoration, production RBAC/auditing, firmware/image lifecycle management, PMU, and frequency/thermal-state collection remain future work. These tests do not replace hardware, permission, or resource-isolation acceptance.
 
 Added regression coverage: ZIP paths/special files/CRC/tampering, FIFO packaging and cumulative extraction limits, cross-board artifact authorization, expired tasks not starting, plan length, total result size/digest validation, bounded downloads, setup failures, timeouts/cancellation, and process-tree cleanup.
+
+A public GitHub repository has been created, with the Side Galaxy project identity as both remote author and committer. Remote CI has not yet succeeded; local passes are not reported here as remote CI passes.
+
+Additional homepage visual acceptance: the browser confirmed the new core, colored dust disk, and composition with both ends visible, without frontend errors. Canvas lifecycle checks cover a single RAF, DPR cap, background/offscreen pause and resume, resize, and static reduced-motion frames. No target-device GPU/frame-rate benchmark was run.

@@ -44,3 +44,4 @@ Agents pass internally constructed artifact paths and runner snapshots to module
 
 `/` introduces modular boards, experiment bundles, and CLI/MCP through a landing page with a side-view galaxy disk, restrained entrance effects and parallax, and reduced-motion support. `/console` is a separate operator console; promotional explanations do not occupy the daily management area. The interface does not present demonstrated capabilities as validated on physical hardware.
 
+Following new feedback, upgrade the main visual to a native Canvas 2D animated side-view galaxy, drawing the core, dust disk, trails, and subtle parallax in separate layers. Bound pixel ratio and particle count, pause while the page is hidden, and use a static frame for reduced motion. Do not add a graphics-library dependency.
