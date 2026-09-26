@@ -2,46 +2,51 @@
 
 ## Context
 
-The repository is empty. Pi 4 and Pi 5, a public GitHub repository, and management-module hot reload are confirmed. Linux with KVM is the selected hypervisor environment, but board addresses, OS versions, and VM names are unavailable. See proposal.md.
+Development started from an empty repository. The initial targets are Pi 4 and Pi 5, with a public GitHub repository and hot-reloadable management modules. Linux with KVM is the selected virtualization platform. See proposal.md for motivation.
 
 ## Goals / Non-Goals
 
-Goals: A complete control-plane workflow that can be validated locally; independent agents and a module protocol; deployable source; a real Linux process experiment module awaiting board acceptance.
-Non-Goals: This iteration does not claim physical KVM acceptance, Jailhouse control, hard real-time behavior, MPAM, cache isolation, synchronized multi-device barriers, or production readiness.
+Goals: A complete control-plane workflow, independent agents, a module protocol, deployable source code, and Linux process and KVM execution modules.
+
+Non-Goals: Jailhouse control, hard real-time scheduling, MPAM, cache partitioning, and synchronized multi-board barriers.
 
 ## Decisions
 
-- Use Python, FastAPI, Pydantic, SQLite, and native HTML/CSS/JS. This simplifies deployment on one server and local development compared with separate microservices and a frontend build. Use the maintained v1 API of the official Python MCP SDK, pinned below v2, rather than implementing the protocol manually.
-- The server orchestrates; agents poll outbound with individual board tokens. Web, CLI, and MCP use operator/read tokens. A reverse proxy or SSH tunnel supplies TLS or protected transport; local demo mode is explicitly enabled. The interface stores tokens only in memory.
-- Grant one task lease per board; each experiment may contain a victim and interferer. Use SQLite BEGIN IMMEDIATE for atomic batch admission. Add resource-graph scheduling when multiple simultaneous experiments on one board are required.
-- Requests contain boards, templates, victim/interference CPU sets, memory, and duration. Run preflight before submission and repeat validation during submission. Report unsupported capabilities, offline or quarantined boards, and conflicts as explicit errors.
-- Track queued, running, cancelling, succeeded, failed, cancelled, and lost states. Cancellation cannot release resources before agent confirmation. Quarantine lost boards and require explicit recovery after workload termination is confirmed. Do not claim distributed exactly-once execution.
-- SQLite stores plans and their SHA-256, module digests, and results. Demo mode can run simulators inside the server; independent agents support simulator and Linux process experiment modules.
-- Store board descriptions as data. Modules are trusted standalone Python files deployed by administrators and use a stdin/stdout JSON protocol. Copy source into private snapshots named by SHA-256 before discovery and execution. Start each task in a new process group. Remote APIs cannot upload management-module source or specify host-local paths. Hot reload occurs at idle polling boundaries; existing processes retain their snapshots, and failure preserves the previous generation. Subprocesses provide fault containment, not a security sandbox for malicious plugins.
-- The Linux module only provides process affinity, address-space limits, and bounded microbenchmarks. CPU 0 is reserved for management by default. Other host processes may still use the same CPUs; this does not replace a hypervisor, cgroups, or resctrl.
-- Draw the side-view galaxy identity as an original SVG: a horizontal elliptical disk, tilted orbit, and bright core, using deep navy, cyan, and warm white. Avoid external fonts and tracking resources.
+- Use Python, FastAPI, Pydantic, SQLite, and native HTML/CSS/JS to simplify deployment on one server and local development. Use the maintained v1 API of the official Python MCP SDK, pinned below v2, instead of implementing the protocol manually.
+- The server orchestrates; agents poll outbound using separate board tokens. Web, CLI, and MCP use operator or read-only tokens. A reverse proxy or SSH tunnel provides transport protection. Local demo mode must be enabled explicitly, and the browser keeps its token only in memory.
+- Grant one job lease per board, with victim and interferer workloads allowed inside that experiment. Use SQLite `BEGIN IMMEDIATE` for atomic batch admission. Introduce resource-graph scheduling only when concurrent experiments on one board are required.
+- Requests specify boards, templates, victim and interference CPU sets, memory, and duration. Preflight runs before submission, and submission repeats validation. Unsupported capabilities, offline boards, quarantine, and resource conflicts produce explicit errors.
+- Track queued, running, cancelling, succeeded, failed, cancelled, and lost states. Cancellation cannot release resources before agent confirmation. Lost boards are quarantined and require explicit recovery after workload termination is verified. The design does not claim distributed exactly-once execution.
+- SQLite stores plans and their SHA-256 hashes, module hashes, and results. Demo mode can execute simulators inside the server; independent agents support simulator and Linux process execution modules.
+- Represent board profiles as data. Modules are trusted, administrator-deployed standalone Python files using a stdin/stdout JSON protocol. Copy source into private snapshots named by SHA-256 before probing and executing it. Start each job in a new process group. Remote management APIs cannot upload module source or specify host-local paths. Hot reload occurs at idle polling boundaries; running processes retain their original snapshots, and failed reloads preserve the previous generation. Subprocesses provide fault containment, not a security sandbox for malicious plugins.
+- The Linux module provides process affinity, address-space limits, and bounded microbenchmarks. CPU 0 is reserved for management by default. Other host processes can still use the same CPUs; these controls do not replace a hypervisor, cgroups, or resctrl. Experiment bundle execution extends the same process controls as described below.
+- Use an original SVG identity: a horizontal elliptical galaxy disk, tilted orbit, and bright core, with deep navy, cyan, and warm white. Avoid external fonts and tracking resources.
 
 ## Risks / Trade-offs
 
-- [Missing hardware information] Provide capability discovery and a complete simulated workflow; validate physical targets separately.
-- [Malicious or uncontrolled plugins] Restrict module deployment to trusted administrators and terminate process groups on timeout. Use narrowly scoped helpers for future privileged operations.
-- [Uncontrolled shared-cache effects] Explicitly mark unsupported controls in the UI and results; do not call affinity complete isolation.
-- [Single-server/single-process capacity] Use one uvicorn worker and SQLite for this version. Add PostgreSQL or a queue when throughput requirements justify them.
+- [Hardware variation] Discover capabilities on each board instead of inferring support from the model name.
+- [Malicious or uncontrolled plugins] Restrict module deployment to trusted administrators, terminate process groups on timeout, and use narrowly scoped helpers for future privileged operations.
+- [Uncontrolled shared-cache effects] Mark unsupported controls explicitly in the UI and results. Do not describe CPU affinity as complete isolation.
+- [Single-server and single-process limits] Use one uvicorn worker and SQLite initially. Introduce PostgreSQL or a queue only when measured throughput requires them.
 
 ## Migration Plan
 
-Local demo → HTTPS server on a private experiment network → batch agent installation → Pi 4 / Pi 5 discovery and bounded experiments → physical KVM-module acceptance. Roll back modules by reloading previously trusted source. Back up databases before upgrades; the initial version does not guarantee migration across versions.
+Deploy an HTTPS server on the experiment network, install agents in batches, discover capabilities on Pi 4 and Pi 5, and configure bounded Linux or KVM experiments.
 
-- The KVM module restricts its domain through local environment variables. Structured virsh argv calls discover running state, save original live vCPU affinity, apply changes online, collect domstats, and restore the original affinity in finally. Failure or unconfirmed restoration quarantines the board. KVM does not start or destroy VMs or change guest memory; experiment bundles arrive through authenticated guest-agent access and execute trusted code through manifest argv arrays.
+The KVM module limits its target domain through local environment configuration. Structured virsh arguments discover its running state, save original live vCPU affinity, apply the experiment affinity, collect `domstats`, and restore the original affinity in `finally`. Failure or unconfirmed restoration quarantines the board. The module does not start or destroy VMs or change guest memory. Experiment bundles travel through authenticated guest-agent access and run trusted commands declared as manifest argv arrays.
 
-## Artifact execution extension
+## Artifact Execution
 
-Address ZIP experiment bundles by SHA-256. Manifests use argv lists for setup/run commands, default environment variables, and output paths; plans support additional arguments and environment overrides. The server stores artifacts by digest, and SQLite records plans, artifact digests, and execution results. Downloads are authorized per board. Limit bundles to 16 MiB compressed, 64 MiB expanded, and 512 members, rejecting symlinks and path traversal. Built-in templates run for at most 120 seconds and custom workloads for at most 86400 seconds. Limit stdout and stderr to 64 KiB each and returned outputs to 512 KiB in total. Explain exceeded limits in the result rather than silently reporting success. Commands run in trusted experiment environments; Linux-user or guest boundaries determine isolation, and temporary directories are not security sandboxes.
+Address ZIP experiment bundles by SHA-256. Their manifests declare `setup` and `run` argv arrays, default environment variables, and output paths; plans can append arguments and override environment variables. The server stores artifacts by digest. SQLite records plans, artifact digests, and execution results. Artifact downloads require authorization for the target board.
 
-Agents pass internally constructed artifact paths and runner snapshots to modules; network clients cannot provide these local paths. KVM uses the QEMU Guest Agent file and guest-exec protocols to transfer a pinned Python runner and ZIP. Guests require Python 3.11+, QGA, and Linux pidfd support to verify process identity during cancellation. The workload template does not accept built-in interference CPU sets; experiments can arrange their own workloads. The simulator only validates artifact arrival and never executes uploaded code. Embed output files in bounded JSON and expose authenticated downloads through the UI and CLI. Larger artifacts, larger outputs, continuous log streaming, and container-image caching are deferred to later versions.
+Limit compressed bundles to 16 MiB, expanded contents to 64 MiB, and archives to 512 members. Reject symbolic links and path traversal. Built-in templates run for at most 120 seconds; custom workloads run for at most 86400 seconds. Bound stdout and stderr to 64 KiB each and returned output files to 512 KiB in total. Report exceeded limits in the result rather than silently reporting success. Commands run in a trusted experiment environment, with isolation determined by the Linux user or guest boundary; temporary directories are not a security sandbox.
 
-## Product Landing Page and Operator Interface
+Agents pass internally constructed artifact paths and runner snapshots to modules; network requests cannot supply these local paths. KVM uses the QEMU Guest Agent file and `guest-exec` protocols to transfer a pinned Python runner and ZIP. Guests require Python 3.11 or newer, QGA, and Linux pidfd support for process identity checks during cancellation. The `workload` template does not accept built-in interference CPU sets; the experiment can organize its own workload roles. Simulators only verify artifact delivery and never execute uploaded code.
 
-`/` introduces modular boards, experiment bundles, and CLI/MCP through a landing page with a side-view galaxy disk, restrained entrance effects and parallax, and reduced-motion support. `/console` is a separate operator console; promotional explanations do not occupy the daily management area. The interface does not present demonstrated capabilities as validated on physical hardware.
+Embed output files in bounded result JSON and expose authenticated downloads through the UI and CLI. Larger artifacts, larger outputs, continuous log streaming, and container image caching are deferred.
 
-Following new feedback, upgrade the main visual to a native Canvas 2D animated side-view galaxy, drawing the core, dust disk, trails, and subtle parallax in separate layers. Bound pixel ratio and particle count, pause while the page is hidden, and use a static frame for reduced motion. Do not add a graphics-library dependency.
+## Product Introduction and Console
+
+`/` introduces modular boards, experiment bundles, and CLI/MCP access through a landing page with a galaxy viewed from the side, restrained entrance effects, and parallax that respects reduced-motion preferences. `/console` is a separate working console. Promotional explanations do not consume the main management area.
+
+The main visual uses native Canvas 2D with separate layers for the galactic core, animated dust disk, trails, and subtle parallax. Bound device pixel ratio and particle count, pause animation when the page is hidden, and render a static frame when reduced motion is preferred. No graphics library dependency is required.

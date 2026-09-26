@@ -2,7 +2,7 @@
 
 An experiment bundle combines code, dependency declarations, launch commands, and result paths. The server stores a ZIP version; each target board's agent downloads it, verifies SHA-256, and executes it on the Linux host or inside the KVM experiment VM. Web, CLI, and MCP share the same artifact and batch APIs. Board and OS profiles select the execution module, so bundles do not need hard-coded Pi model names.
 
-The current simulated boards validate only the distribution workflow and **do not execute uploaded code**. Actual execution requires a connected `linux-process` agent or a `linux-kvm` agent whose guest meets the guest-agent requirements. These examples have run in real local subprocesses; Pi and KVM target acceptance is recorded separately.
+Simulated boards exercise artifact distribution and **do not execute uploaded code**. Code execution requires a connected `linux-process` agent or a `linux-kvm` agent whose guest meets the guest-agent requirements.
 
 ## Minimal Experiment Directory
 
@@ -85,7 +85,7 @@ OS configuration and deployment prepare the base environment, including Python, 
 }
 ```
 
-This is a manifest fragment; add `schema`, `name`, and the other required fields. The target must already have pip and access to the selected dependency source. Offline experiments can bundle dependencies or preinstall them in a fixed OS or VM image. Installation consumes the experiment's total time budget: setup, run, and collection share `duration_seconds`, with a workload maximum of 86,400 seconds. There is currently no dependency cache shared across tasks, image-build service, or persistent-service orchestration.
+This is a manifest fragment; add `schema`, `name`, and the other required fields. The target must already have pip and access to the selected dependency source. Offline experiments can bundle dependencies or preinstall them in a fixed OS or VM image. Installation consumes the experiment's total time budget: setup, run, and collection share `duration_seconds`, with a workload maximum of 86,400 seconds. Each experiment uses a separate working directory; preinstall dependencies in the target environment when they must be reused across tasks.
 
 The Linux module runs experiments with the agent account's permissions. CPU affinity and per-process address-space limits do not provide complete isolation. The KVM module transfers the ZIP and pinned runner into a preconfigured running VM and executes them through QEMU Guest Agent. The guest requires Python 3 and a working QGA; the host continues to manage vCPU affinity through libvirt. Preflight rejects submissions to modules that do not advertise workload support.
 

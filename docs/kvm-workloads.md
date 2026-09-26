@@ -39,14 +39,12 @@ For KVM, `memory_mib` must be `null`; the module does not change VM memory. Host
 
 Cancellation runs a fixed Python helper through Guest Agent: it checks that the process command contains this run's runner path, sends SIGTERM to the runner through pidfd, and waits for its final JSON cleanup evidence. If Guest Agent disconnects, the launch acknowledgment is lost, runner output is invalid, workspace removal fails, or live affinity restoration fails, `cleanup_ok` is `false`. Available PID, workspace, and phase information is retained for administrator inspection; the VM or board is not automatically rebooted.
 
-Guest Agent usually has extensive guest privileges, so this is intended only for trusted experiments and dedicated VMs; it does not provide multitenant code isolation. Bundles can run for up to 24 hours. Persistent hosting of network services and background daemons is outside this version's batch experiment protocol.
+Guest Agent usually has extensive guest privileges, so this is intended only for trusted experiments and dedicated VMs; it does not provide multitenant code isolation. Bundles can run for up to 24 hours. This protocol executes finite batch experiments and does not host persistent network services or background daemons.
 
 `cleanup_ok` checks the runner's process groups, task temporary directory, and KVM live affinity. Software installed by the bundle, system configuration changes, and files written outside the workspace are not automatically rolled back. Keep `setup` repeatable; full guest-state restoration requires a separate image or snapshot management workflow.
 
-## Results and Acceptance Scope
+## Result Fields
 
-Results include execution mode, artifact and runner digests, boot IDs before and after execution, KVM domain UUID, original/applied/restored affinities, and runner logs and outputs. The control plane separately pins the module generation and request digest. Matching boot IDs only show that the observed host boot identifier has not changed; they do not demonstrate isolation performance.
-
-`tests/test_execution_transport.py` covers QGA chunked transfer, short writes, cancellation, lost launch acknowledgments, log truncation, cleanup failure, and restoration of the original affinity, using mocked QGA responses. Linux startup-limit failure paths are also tested. **These tests do not constitute Pi 4, Pi 5, or real KVM acceptance.** Hardware validation must still check Guest Agent permissions, file-transfer throughput, cancellation latency, actual affinity, boot IDs, experiment outputs, and recovery after failure.
+Results include execution mode, artifact and runner digests, boot IDs before and after execution, KVM domain UUID, original/applied/restored affinities, and runner logs and outputs. The control plane separately pins the module generation and request digest. Boot IDs before and after execution help identify host reboots during the experiment.
 
 Protocol references: [QEMU Guest Agent protocol](https://www.qemu.org/docs/master/interop/qemu-ga-ref.html), [libvirt virsh](https://www.libvirt.org/manpages/virsh.html#qemu-agent-command).

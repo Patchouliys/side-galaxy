@@ -14,11 +14,11 @@ Example system profile, saved as `systems/custom-linux.json`:
 {"id":"custom-linux","name":"Custom Linux","module":"linux_process","requires":"Linux sched_setaffinity"}
 ```
 
-`architecture`, `soc`, and `expected_cores` are declarations, not hardware discovery results. Admission uses the CPUs, memory, reserved CPUs, capabilities, and templates reported by the module. The initial agent requires Python 3.11+ and POSIX process groups. Extensible manifests do not mean that Windows, bare-metal, or RTOS targets are already supported; those targets require a compatible agent or bridge module in a Linux management domain or on an external controller.
+`architecture`, `soc`, and `expected_cores` are declarations, not hardware discovery results. Admission uses the CPUs, memory, reserved CPUs, capabilities, and templates reported by the module. Agents require Python 3.11+ and POSIX process groups. Windows, bare-metal, and RTOS targets require a compatible agent or bridge module running in a Linux management domain or on an external controller.
 
 ## Standalone Module Protocol v1
 
-A trusted administrator deploys a standalone Python file, selected by the agent through `--module-file /opt/side-galaxy/modules/custom.py`. Network interfaces cannot submit module paths or source code. The file must depend only on the standard library or explicitly deployed packages; relative imports from sibling files do not work with single-file content snapshots. Complex modules may later use versioned packages with manifests.
+A trusted administrator deploys a standalone Python file, selected by the agent through `--module-file /opt/side-galaxy/modules/custom.py`. Network interfaces cannot submit module paths or source code. The file must depend only on the standard library or explicitly deployed packages; relative imports from sibling files do not work with single-file content snapshots.
 
 Each invocation starts a new process. stdin contains one JSON value, stdout must contain exactly one JSON object, and diagnostics go to stderr. The agent does not upload stderr.
 
@@ -44,10 +44,10 @@ Execution input: `{"op":"run","plan":{...},"run_id":"UUID"}`. Workloads also rec
 3. New tasks pin a generation. Running tasks do not reimport or replace their implementation.
 4. Idle polling automatically discovers changes to the same source file. `sg reload BOARD_ID`, Web, or MCP can explicitly request rediscovery.
 5. Requested reloads are handled after execution and result submission finish. Board queries expose reload errors; acknowledging a request does not mean the new generation loaded successfully.
-6. A generation change after admission causes the queued task to be rejected. Run preflight again before resubmitting. To roll back, restore previously validated source and manifests, then reload.
+6. A generation change after admission causes the queued task to be rejected. Run preflight again before resubmitting.
 
 Process modules have time limits. On timeout, the agent first sends SIGTERM, then forcibly terminates the process group after 10 seconds. Handled KVM cancellation attempts restoration in `finally`; SIGKILL, power loss, or a host crash cannot guarantee restoration. Unknown state therefore quarantines the board. Verify live pinning manually before using `sg recover BOARD_ID --cleanup-confirmed`. Do not use recovery to bypass cleanup.
 
 KVM operations are restricted to the dedicated experiment VM selected by the agent's local `SG_KVM_DOMAIN` environment variable, initially resolved to a UUID. Administrators should configure the agent's libvirt permissions for that VM. Concurrent changes by other tools invalidate the snapshot-and-restore assumptions and must be prohibited during experiments.
 
-Execution modules declare built-in templates through `templates`. The `workload` template executes a ZIP bundle identified by SHA-256; its manifest declares setup/run argv arrays, environment variables, and outputs. See [experiment bundles](workloads.md). Digest verification is implemented; signatures are not yet implemented. Administrators still deploy management-module source locally on the board. Descriptions may set `memory_limit_required:true`; shared preflight then rejects plans without a memory budget. The module generation digest also covers the runner and board/system descriptions. Running code is never replaced.
+Execution modules declare built-in templates through `templates`. The `workload` template executes a ZIP bundle identified by SHA-256; its manifest declares setup/run argv arrays, environment variables, and outputs. See [experiment bundles](workloads.md). SHA-256 verifies content integrity, not publisher identity. Administrators still deploy management-module source locally on the board. Descriptions may set `memory_limit_required:true`; shared preflight then rejects plans without a memory budget. The module generation digest also covers the runner and board/system descriptions. Running code is never replaced.

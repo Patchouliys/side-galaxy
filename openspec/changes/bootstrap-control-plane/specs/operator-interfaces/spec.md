@@ -28,7 +28,7 @@ The project SHALL provide inventory examples for multiple devices and repeatable
 
 #### Scenario: Public repository
 - **WHEN** version-controlled deployment files are inspected
-- **THEN** they contain only fictitious addresses and placeholder configuration, without real identities or secrets
+- **THEN** they contain only fictitious addresses and placeholder configuration, without host-local identifiers, private device addresses, or secrets
 
 ### Requirement: Experiment artifacts
 
