@@ -20,4 +20,5 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm run spec:validate
       - run: node --check src/side_galaxy/static/app.js
+      - run: node --check src/side_galaxy/static/homepage.js
       - run: uv build

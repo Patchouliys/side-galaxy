@@ -168,7 +168,7 @@ def create_app(db_path=".data/galaxy.db", demo=False, token=None, read_token=Non
     def finish(board_id: str, run_id: str, data: Completion): return store.finish(board_id, run_id, data)
 
     @app.get("/")
-    def index(): return FileResponse(STATIC / "index.html")
+    def index(): return FileResponse(STATIC / "homepage.html")
 
     @app.get("/console")
     def console(): return FileResponse(STATIC / "index.html")

@@ -1,20 +1,72 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Side Galaxy · 侧视星系</title><link rel="icon" href="/static/icon.svg" type="image/svg+xml"><link rel="stylesheet" href="/static/style.css"><script src="/static/app.js" defer></script></head>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>控制台 · Side Galaxy</title>
+  <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css"><script src="/static/app.js" defer></script>
+</head>
 <body>
-<aside class="sidebar"><a class="brand" href="/"><img src="/static/icon.svg" alt="侧视星系标识"><span>side galaxy<small>侧视星系 / CONTROL PLANE</small></span></a><div class="workspace"><span class="workspace-icon">G</span><div>实验室<small>嵌入式板卡管理</small></div><span class="dot"></span></div><nav aria-label="主导航"><button class="nav active" data-view="overview"><span>◉</span>板卡</button><button class="nav" data-view="experiments"><span>⌁</span>实验<small id="nav-count">0</small></button><button class="nav" data-view="modules"><span>◇</span>模块</button></nav><div class="sidebar-bottom"><button id="auth-button" class="quiet">⚿ 连接凭据</button><div class="version">SIDE GALAXY <span>v0.1 PREVIEW</span></div></div></aside>
-<main><header class="topbar"><div><span class="breadcrumb">实验室</span><span class="slash">/</span><span id="page-name">板卡</span></div><div class="top-status"><span id="connection" class="muted">连接中</span><span id="mode" class="badge">LOCAL</span><button id="refresh" class="icon-button" aria-label="刷新数据">↻</button></div></header>
-<section id="overview" class="view">
-<div class="hero"><div class="hero-copy"><h1>开发板管理</h1><p>查看板卡状态，配置资源，批量运行实验。</p></div><img class="compact-mark" src="/static/icon.svg" alt=""></div>
-<div class="metrics"><article><span>在线板卡</span><strong id="metric-online">—</strong><p id="metric-total">等待心跳</p></article><article><span>可规划核心</span><strong id="metric-cores">—</strong><p>不含管理保留核</p></article><article><span>运行中实验</span><strong id="metric-active">—</strong><p>包含排队与取消中任务</p></article><article><span>完成实验</span><strong id="metric-complete">—</strong><p>最近 100 个批次</p></article></div>
-<div class="work-grid"><section class="fleet-panel"><div class="section-heading"><div><h2>板卡列表 <span id="board-count">0</span></h2></div><button id="select-all" class="quiet">选择可用板卡</button></div><label class="search"><span>⌕</span><input id="search" placeholder="按名称、板型或系统筛选" aria-label="筛选板卡"><kbd>/</kbd></label><div id="boards" class="boards"><p class="empty">正在读取板卡状态…</p></div><div class="fleet-foot"><span><i class="dot"></i> 管理核心保持保留</span><span>每 2 秒刷新</span></div></section>
-<section class="launch-panel"><div class="section-heading"><div><h2>发起实验</h2></div></div><form id="experiment-form"><label>实验模板<select id="template"><option value="cpu-contention">CPU 竞争 · victim + interferer</option><option value="memory-copy">内存拷贝 · shared memory load</option><option value="kvm-affinity">KVM 在线绑核 · live affinity</option></select></label><div class="input-pair"><label>实验核心<input id="cpus" value="1" required placeholder="1,2"></label><label>干扰核心<input id="noise" value="2" placeholder="留空禁用"></label></div><div class="input-pair"><label>内存预算 / MiB<input id="memory" type="number" min="128" max="65536" value="256"></label><label>持续时间 / s<input id="duration" type="number" min="1" max="120" value="5" required></label></div><div class="plan-note"><span>◇</span><p id="plan-note">每块板卡同时运行一个实验；实验内部可以包含干扰进程。</p></div><div class="selection-line"><span>已选择目标</span><strong id="selected-count">0 块板卡</strong></div><button id="launch" type="submit" class="primary">预检并启动实验 <span>↗</span></button><button id="preflight" type="button" class="secondary">仅预检资源</button><p class="hint" id="evidence-note">模拟模式的数值为合成数据，不代表硬件测量。</p></form><p id="feedback" role="status" aria-live="polite"></p></section></div>
-<section class="recent"><div class="section-heading"><div><h2>最近实验</h2></div><button class="quiet" data-view="experiments">查看全部 ↗</button></div><div id="recent-runs"></div></section>
-</section>
-<section id="experiments" class="view" hidden><div class="page-title"><h1>实验记录</h1><p>查询执行状态、资源计划和结果。</p></div><div id="all-runs"></div></section>
-<section id="modules" class="view" hidden><div class="page-title"><h1>模块管理</h1><p>重载在当前实验结束后生效；验证失败时继续使用原版本。</p></div><div id="module-list"></div><div class="section-heading"><h2>已安装清单</h2></div><div id="profiles" class="profile-grid"></div></section>
-
+<a class="skip-link" href="#overview">跳到工作区</a>
+<aside class="sidebar">
+  <a class="brand" href="/" aria-label="Side Galaxy 首页"><img src="/static/icon.svg" alt=""><span>side galaxy<small>侧视星系</small></span></a>
+  <div class="workspace"><span class="workspace-icon">G</span><span>实验室<small>设备与实验</small></span><i class="dot"></i></div>
+  <nav aria-label="主导航">
+    <button class="nav active" data-view="overview" aria-label="工作区"><span aria-hidden="true">◉</span><b>工作区</b></button>
+    <button class="nav" data-view="artifacts" aria-label="制品库"><span aria-hidden="true">▱</span><b>制品库</b><small id="artifact-count">0</small></button>
+    <button class="nav" data-view="experiments" aria-label="实验记录"><span aria-hidden="true">⌁</span><b>实验记录</b><small id="nav-count">0</small></button>
+    <button class="nav" data-view="modules" aria-label="模块管理"><span aria-hidden="true">◇</span><b>模块管理</b></button>
+    <button class="nav" data-view="help" aria-label="接入与帮助"><span aria-hidden="true">⌘</span><b>接入与帮助</b></button>
+  </nav>
+  <div class="sidebar-bottom"><button id="auth-button" class="quiet" aria-label="设置连接凭据"><span aria-hidden="true">⚿</span> <b>连接凭据</b></button><div class="version"><span>v0.1</span><span>PREVIEW</span></div></div>
+</aside>
+<main>
+  <header class="topbar"><div><span class="breadcrumb">实验室</span><span class="slash">/</span><span id="page-name">工作区</span></div><div class="top-status"><span id="connection" class="muted">连接中</span><span id="mode" class="badge">LOCAL</span><button id="refresh" class="icon-button" aria-label="刷新数据">↻</button></div></header>
+  <section id="overview" class="view" tabindex="-1">
+    <div class="page-title"><h1>工作区</h1><p>把实验交给板卡，把结果带回来。</p></div>
+    <div class="metrics"><article><span>在线板卡</span><strong id="metric-online">—</strong><small id="metric-total">等待心跳</small></article><article><span>可规划核心</span><strong id="metric-cores">—</strong><small>已扣除管理保留核</small></article><article><span>执行中</span><strong id="metric-active">—</strong><small>含排队与取消中</small></article><article><span>已完成</span><strong id="metric-complete">—</strong><small>最近 100 个批次</small></article></div>
+    <div class="work-grid">
+      <section class="fleet-panel"><div class="section-heading"><h2>目标板卡 <span id="board-count">0</span></h2><button id="select-all" class="quiet">选择可用板卡</button></div><label class="search"><span aria-hidden="true">⌕</span><input id="search" placeholder="筛选名称、板型或系统" aria-label="筛选板卡"><kbd>/</kbd></label><div id="boards" class="boards"><p class="empty">正在读取板卡状态…</p></div><p class="fleet-foot">每 2 秒刷新 · 灰色核心为管理保留核</p></section>
+      <section class="launch-panel"><div class="section-heading"><h2>新建实验</h2><button class="quiet" data-view="artifacts">管理制品 ↗</button></div>
+        <form id="experiment-form">
+          <label>实验来源<select id="source"><option value="artifact">实验包 · 自定义代码</option><option value="builtin">内置诊断</option></select></label>
+          <div id="artifact-fields" class="field-group">
+            <label>实验包<div class="inline-field"><select id="artifact" aria-label="选择实验包"><option value="">请上传实验 ZIP</option></select><button class="secondary compact" type="button" data-upload>上传</button></div></label>
+            <div id="artifact-summary" class="artifact-summary">ZIP 中包含 experiment.json、代码及实验所需文件。</div>
+            <label>附加参数 <span class="label-note">JSON 数组</span><textarea id="arguments" rows="2" spellcheck="false" placeholder='["--samples", "1000"]'>[]</textarea></label>
+            <label>环境变量 <span class="label-note">JSON 对象，覆盖包内默认值</span><textarea id="environment" rows="2" spellcheck="false" placeholder='{"EXPERIMENT_MODE": "baseline"}'>{}</textarea></label>
+          </div>
+          <label id="builtin-fields" class="field-group" hidden>诊断模板<select id="template"><option value="cpu-contention">CPU 竞争</option><option value="memory-copy">内存拷贝</option><option value="kvm-affinity">KVM 在线绑核</option></select></label>
+          <details id="resource-options" class="resource-options"><summary>资源与执行限制 <span id="resource-summary">CPU 1 · 30 s</span></summary><div class="input-pair"><label>实验核心<input id="cpus" value="1" required placeholder="1,2"></label><label>超时 / s<input id="duration" type="number" min="1" max="120" value="30" required></label></div><label id="noise-field">干扰核心<input id="noise" value="" placeholder="留空禁用" disabled></label><label>内存策略<select id="memory-mode"><option value="auto">按目标能力自动选择</option><option value="limit">指定进程内存预算</option><option value="none">不更改 VM 内存</option></select></label><label id="memory-field" hidden>内存预算 / MiB<input id="memory" type="number" min="128" max="65536" value="256"></label><p id="plan-note" class="hint">支持进程内存限制时使用 256 MiB；KVM 保持 VM 内存不变。</p></details>
+          <div class="selection-line"><span>执行目标</span><strong id="selected-count">0 块板卡</strong></div><div class="submit-actions"><button id="preflight" type="button" class="secondary">预检</button><button id="launch" type="submit" class="primary">预检并运行 <span aria-hidden="true">↗</span></button></div><p class="hint" id="evidence-note">模拟设备不会执行上传代码。</p>
+        </form><p id="feedback" role="status" aria-live="polite"></p>
+      </section>
+    </div>
+    <section class="recent"><div class="section-heading"><h2>最近实验</h2><button class="quiet" data-view="experiments">全部记录 ↗</button></div><div id="recent-runs"></div></section>
+  </section>
+  <section id="artifacts" class="view" hidden><div class="page-title title-with-action"><div><h1>制品库</h1><p>代码、依赖安装步骤与启动命令，组成一个可追溯版本。</p></div><button class="primary compact" data-upload>上传实验 ZIP</button></div><div class="artifact-guide"><div><h2>你的代码，你的实验</h2><p>在 ZIP 根目录放置 <code>experiment.json</code>。声明 <code>setup</code>、<code>run</code> 和 <code>outputs</code>；运行时可附加参数、覆盖环境变量。</p><p class="hint">压缩包 ≤ 16 MiB · 展开 ≤ 64 MiB · 最多 512 个条目</p></div><details><summary>清单示例</summary><pre>{
+  "schema": 1,
+  "name": "latency-benchmark",
+  "setup": [],
+  "run": ["python3", "experiment.py"],
+  "env": {"SAMPLES": "1000"},
+  "outputs": ["results.json"]
+}</pre><p class="hint">命令是 argv 数组；环境依赖需已安装，或在 setup 中准备。</p></details></div><div id="artifact-list" class="artifact-list"><p class="empty">正在读取制品…</p></div></section>
+  <section id="experiments" class="view" hidden><div class="page-title"><h1>实验记录</h1><p>逐板查看执行状态、日志、输出文件与版本证据。</p></div><div id="all-runs"></div></section>
+  <section id="modules" class="view" hidden><div class="page-title"><h1>模块管理</h1><p>在板端更新可信模块后请求重载。当前实验继续使用固定版本。</p></div><div id="module-list"></div><div class="section-heading spaced"><h2>板型与系统配置</h2></div><div id="profiles" class="profile-grid"></div></section>
+  <section id="help" class="view" hidden><div class="page-title"><h1>接入与帮助</h1><p>Web、CLI 和 AI 使用同一套实验与准入接口。</p></div><div class="help-grid"><article class="help-card"><span class="eyebrow">01 / 实验链路</span><h2>从文件到板卡</h2><ol><li>上传 ZIP，服务器校验并保存 SHA-256 版本。</li><li>选择板卡、参数和资源，原子预检后提交。</li><li>板端代理拉取任务与制品，交由固定版本模块执行。</li><li>Linux 运行进程；KVM 通过 QEMU guest agent 在 VM 内执行。</li><li>回传最终日志、退出码和声明的输出文件。</li></ol><p class="hint">KVM guest 需要 Python 3 与 QEMU guest agent。日志在任务结束后回传，输出总量上限 512 KiB。模拟器仅验证分发。</p></article><article class="help-card"><span class="eyebrow">02 / 命令行</span><h2>可脚本化的实验</h2><pre>sg boards
+sg artifacts
+sg pack experiment/ --output experiment.zip
+sg artifact-upload experiment.zip
+sg preflight plan.json
+sg submit plan.json --key experiment-001
+sg batch &lt;batch-id&gt;</pre><p>使用 <code>SG_SERVER</code> 指向服务器，<code>SG_TOKEN</code> 提供访问令牌。</p></article><article class="help-card"><span class="eyebrow">03 / AI 接入</span><h2>MCP stdio</h2><pre>sg mcp
+# 允许 AI 提交、取消与重载
+sg mcp --allow-writes</pre><p>将 <code>sg</code> 设为 MCP 客户端 command，<code>["mcp"]</code> 设为 args。默认只读；写入仍受服务器令牌与准入约束。</p></article><article class="help-card"><span class="eyebrow">04 / 模块与部署</span><h2>按板型与系统扩展</h2><p>板型描述、系统配置与执行模块各自独立。代理使用本地配置连接服务器，额外 profiles 通过 <code>--profiles-dir</code> 加载。</p><p>仓库的 <code>deploy/</code> 提供容器与 Ansible 部署入口。安装细节、私密清单与真机验收步骤见 <code>docs/operations.md</code>。</p><p class="hint">模块由管理员在板端部署；界面上传的是实验制品。</p></article></div></section>
 </main>
-<dialog id="auth-dialog"><form id="auth-form"><h2>连接控制面</h2><p>输入服务器的 Operator 或只读令牌。令牌仅保留在当前页面内存。</p><label>访问令牌<input id="token" type="password" autocomplete="off"></label><div class="dialog-actions"><button type="button" id="auth-close" class="secondary">取消</button><button class="primary">连接</button></div></form></dialog>
-<dialog id="result-dialog"><div class="section-heading"><h2>实验记录</h2><button id="result-close" class="icon-button" aria-label="关闭结果">×</button></div><button id="export" class="secondary">导出 JSON 证据</button><pre id="result-content"></pre></dialog>
+<input id="artifact-file" type="file" accept=".zip,application/zip" hidden>
+<dialog id="auth-dialog"><form id="auth-form"><h2>连接控制面</h2><p>输入 Operator 或只读令牌，仅保留在当前页面内存。</p><label>访问令牌<input id="token" type="password" autocomplete="off"></label><div class="dialog-actions"><button type="button" id="auth-close" class="secondary">取消</button><button class="primary">连接</button></div></form></dialog>
+<dialog id="result-dialog" class="result-dialog"><div class="section-heading"><div><h2>实验记录</h2><p id="result-meta" class="hint"></p></div><button id="result-close" class="icon-button" aria-label="关闭结果">×</button></div><div id="result-runs"></div><details class="raw-evidence"><summary>完整 JSON 证据</summary><button id="export" class="secondary compact">导出 JSON</button><pre id="result-content"></pre></details></dialog>
 <div id="toast" role="status" aria-live="polite" hidden></div>
-</body></html>
+</body>
+</html>

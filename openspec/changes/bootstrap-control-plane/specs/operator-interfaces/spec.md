@@ -46,3 +46,11 @@ The platform SHALL limit compressed and expanded bundle sizes and reject path tr
 - **WHEN** an uploaded ZIP contains absolute paths or parent-directory traversal
 - **THEN** the platform rejects it without registering an artifact
 
+### Requirement: Separate product introduction
+
+The landing page SHALL introduce the platform using the side-view galaxy identity and visual effects that support disabling motion, and provide an entry point to the console. The console SHALL remain compact, expose verifiable experiment parameters and resource capabilities, and keep promotional content outside the primary working area.
+
+#### Scenario: Enter working console
+- **WHEN** a visitor opens the landing page and selects the console entry point
+- **THEN** a separate board and experiment management page opens with a way to return to the landing page
+

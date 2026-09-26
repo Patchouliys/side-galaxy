@@ -15,7 +15,7 @@ uv sync --frozen
 uv run sg serve --demo
 ```
 
-Open `http://127.0.0.1:7980`, select boards, and launch an experiment. Demo data is explicitly marked synthetic.
+Open `http://127.0.0.1:7980` for the homepage, then enter `/console` to select boards and launch experiments. Demo data is explicitly marked synthetic; synthetic boards do not execute uploaded code.
 
 ```sh
 uv run sg boards
@@ -29,7 +29,8 @@ uv run sg batches
 - An edge-on galaxy interface with deep-space blue and a cyan core, original SVG icons, and responsive board and experiment views.
 - Board/system profiles, trusted execution modules in separate processes, content-hash version pinning, and hot reload at idle boundaries.
 - Atomic multi-board admission, reserved-core checks, leases, idempotency, cancellation acknowledgement, lost-agent quarantine, and JSON results.
-- Linux process experiments; live vCPU affinity, statistics, and original-configuration restoration for selected KVM VMs.
+- ZIP experiment bundle upload, validation, and digest-addressed distribution; custom setup/run, arguments, and environment; log and output downloads.
+- Linux process experiments; live vCPU affinity, QGA bundle transfer and execution, statistics, and original-configuration restoration for selected KVM VMs.
 - Per-board agent tokens, operator/read roles, a same-origin interface, CLI, and MCP stdio implemented with the official SDK.
 - Container control-plane configuration and an Ansible entry point for multi-board agent deployment (not deployed on an actual server or boards).
 
@@ -39,6 +40,8 @@ uv run sg batches
 - [Modules and hot reload](docs/modules.md): protocols and extensions for new board profiles, systems, and execution modules.
 - [Operations, deployment, and AI integration](docs/operations.md): the server, Pi + KVM, Ansible, CLI, and MCP.
 - [Verification record](docs/verification.md): the boundary between local verification and unverified real hardware.
+- [Experiment code, dependencies, and results](docs/workloads.md): bundle structure and the upload/run workflow.
+- [KVM guest integration](docs/kvm-workloads.md): QGA, permissions, transfer, and cleanup boundaries.
 - [Brand guide](docs/brand.md): icon, logo, and theme.
 
 ## Development
@@ -54,3 +57,7 @@ uv run python scripts/check_integration.py
 OpenSpec 1.13.2 manages proposal / specs / design / tasks under `openspec/`; the Ponytail skill is pinned to `.agents/skills/ponytail`. Project commands disable telemetry. Define capabilities and acceptance criteria before adding the smallest implementation; synthetic results are not evidence from real hardware.
 
 MIT · Side Galaxy contributors. Public code includes third-party skills and their original licenses; it excludes real device addresses, access credentials, and runtime databases.
+
+## Versions and Rollback
+
+Features are committed in stages, with scope and acceptance checklists retained in OpenSpec. Use `git log --oneline` to inspect history and `git switch -c inspect-baseline COMMIT` to examine older code on a new branch; use `git revert COMMIT` to create a reversal commit for a published change. Save uncommitted work first. Reverting code does not automatically revert runtime databases, board state, or experiment outputs; wait for tasks to finish and back up the database before maintenance.
