@@ -1,0 +1,1 @@
+{"id":"simulator","name":"Simulation runtime","module":"simulator","requires":"Python 3.11+","verified_on_hardware":false}

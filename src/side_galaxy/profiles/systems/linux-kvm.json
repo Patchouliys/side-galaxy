@@ -1,0 +1,1 @@
+{"id":"linux-kvm","name":"Linux + KVM / libvirt","module":"kvm","requires":"virsh, a running dedicated VM and SG_KVM_DOMAIN","verified_on_hardware":false}

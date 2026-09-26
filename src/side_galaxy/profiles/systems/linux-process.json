@@ -1,0 +1,1 @@
+{"id":"linux-process","name":"64-bit Linux · process experiments","module":"linux_process","requires":"Linux with sched_setaffinity; no root required","verified_on_hardware":false}

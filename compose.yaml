@@ -1,0 +1,22 @@
+services:
+  control:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+    environment:
+      SG_TOKEN: ${SG_TOKEN:?Set a strong operator token}
+      SG_READ_TOKEN: ${SG_READ_TOKEN:-}
+    ports:
+      - "127.0.0.1:7980:7980"
+    volumes:
+      - galaxy-data:/data
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+volumes:
+  galaxy-data:

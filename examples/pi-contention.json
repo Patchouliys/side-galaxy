@@ -1,0 +1,1 @@
+{"boards":["pi4-lab","pi5-lab"],"template":"cpu-contention","cpus":[1],"interference_cpus":[2],"memory_mib":256,"duration_seconds":5}

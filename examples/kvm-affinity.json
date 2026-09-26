@@ -1,0 +1,1 @@
+{"boards":["REPLACE_WITH_ENROLLED_BOARD_ID"],"template":"kvm-affinity","cpus":[1,2],"interference_cpus":[],"memory_mib":null,"duration_seconds":10}

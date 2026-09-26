@@ -1,0 +1,120 @@
+import argparse
+import json
+import os
+from pathlib import Path
+import signal
+import sys
+import time
+import uuid
+
+from .client import Client
+from .models import Enrollment, Plan
+
+
+def output(value): print(json.dumps(value, indent=2, ensure_ascii=False))
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog="sg", description="Side Galaxy · modular board experiments")
+    parser.add_argument("--server", default=os.environ.get("SG_SERVER", "http://127.0.0.1:7980"))
+    sub = parser.add_subparsers(dest="command", required=True)
+    serve = sub.add_parser("serve")
+    serve.add_argument("--demo", action="store_true")
+    serve.add_argument("--host", default="127.0.0.1")
+    serve.add_argument("--port", type=int, default=7980)
+    serve.add_argument("--db", default=".data/galaxy.db")
+    sub.add_parser("boards")
+    sub.add_parser("profiles")
+    sub.add_parser("batches")
+    for name in ("preflight", "submit"):
+        p = sub.add_parser(name)
+        p.add_argument("plan", help="JSON file or - for stdin")
+        if name == "submit": p.add_argument("--key", required=True, help="Stable idempotency key; reuse on retry")
+    for name in ("batch", "cancel", "reload", "recover"):
+        p = sub.add_parser(name)
+        p.add_argument("id")
+        if name == "recover": p.add_argument("--cleanup-confirmed", action="store_true")
+    enroll = sub.add_parser("enroll")
+    enroll.add_argument("--name", required=True)
+    enroll.add_argument("--board-profile", default="generic")
+    enroll.add_argument("--system-profile", default="simulator")
+    enroll.add_argument("--output", required=True, help="Private new agent config file (0600)")
+    agent = sub.add_parser("agent")
+    agent.add_argument("--config", required=True)
+    agent.add_argument("--state-dir", default=".data/agent")
+    agent.add_argument("--module-file", help="Trusted local standalone Python module")
+    agent.add_argument("--profiles-dir", help="Additional boards/ and systems/ manifest directories")
+    mcp = sub.add_parser("mcp")
+    mcp.add_argument("--allow-writes", action="store_true")
+    args = parser.parse_args(argv)
+    try:
+        if args.command == "serve":
+            if args.demo and args.host not in ("127.0.0.1", "::1", "localhost"):
+                parser.error("--demo must bind to loopback")
+            import uvicorn
+            from .api import create_app
+            app = create_app(args.db, args.demo, os.environ.get("SG_TOKEN"), os.environ.get("SG_READ_TOKEN"))
+            uvicorn.run(app, host=args.host, port=args.port, access_log=False)
+            return
+        if args.command == "mcp":
+            from .mcp_server import create_mcp
+            os.environ["SG_SERVER"] = args.server
+            create_mcp(args.allow_writes).run(transport="stdio")
+            return
+        if args.command == "agent":
+            from .runtime import Agent, Modules
+            config = Path(args.config)
+            if config.stat().st_mode & 0o077: raise ValueError("Agent config must be private: chmod 600")
+            data = json.loads(config.read_text())
+            client = Client(data["server"], data["agent_token"])
+            modules = Modules(args.state_dir, data["board_profile"], data["system_profile"], args.profiles_dir, args.module_file)
+            runner = Agent(client, data["board_id"], modules)
+            def shutdown(signum, frame): raise KeyboardInterrupt
+            signal.signal(signal.SIGTERM, shutdown)
+            last_ok = time.monotonic()
+            try:
+                while True:
+                    try:
+                        runner.tick()
+                        last_ok = time.monotonic()
+                    except Exception as exc:
+                        print("Agent connection or protocol error: " + type(exc).__name__, file=sys.stderr)
+                        if runner.execution:
+                            if time.monotonic() - last_ok > 20: runner.execution.stop()
+                            completed = runner.execution.poll()
+                            if completed:
+                                runner.pending = (runner.execution.job["id"], completed)
+                                runner.execution = None
+                    time.sleep(1)
+            except KeyboardInterrupt:
+                runner.shutdown()
+            finally: client.http.close()
+            return
+        client = Client(args.server)
+        try:
+            if args.command in ("boards", "profiles", "batches"):
+                output(client.request("GET", "/api/" + ("catalog" if args.command == "profiles" else args.command)))
+            elif args.command in ("preflight", "submit"):
+                text = sys.stdin.read() if args.plan == "-" else Path(args.plan).read_text()
+                plan = Plan.model_validate_json(text)
+                output(client.request("POST", "/api/preflight" if args.command == "preflight" else "/api/batches", plan.model_dump(), getattr(args, "key", None)))
+            elif args.command == "batch": output(client.request("GET", "/api/batches/" + args.id))
+            elif args.command == "cancel": output(client.request("POST", "/api/batches/" + args.id + "/cancel"))
+            elif args.command in ("reload", "recover"):
+                suffix = "?cleanup_confirmed=true" if getattr(args, "cleanup_confirmed", False) else ""
+                output(client.request("POST", f"/api/boards/{args.id}/{args.command}" + suffix))
+            elif args.command == "enroll":
+                # Reserve private output before creating a board; never overwrite existing credentials.
+                fd = os.open(args.output, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                with os.fdopen(fd, "w") as stream:
+                    record = Enrollment(name=args.name, board_profile=args.board_profile, system_profile=args.system_profile)
+                    result = client.request("POST", "/api/boards", record.model_dump())
+                    json.dump({**result, "server": args.server, "board_profile": args.board_profile, "system_profile": args.system_profile}, stream, indent=2)
+                output({"board_id": result["board_id"], "config_saved": True})
+        finally: client.http.close()
+    except (ValueError, OSError, KeyError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__": sys.exit(main())

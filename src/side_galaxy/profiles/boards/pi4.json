@@ -1,0 +1,1 @@
+{"id":"pi4","name":"Raspberry Pi 4 Model B","architecture":"aarch64","soc":"BCM2711 / Cortex-A72","expected_cores":4,"reserved_cpus":[0]}

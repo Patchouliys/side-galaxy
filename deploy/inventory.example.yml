@@ -1,0 +1,16 @@
+all:
+  children:
+    galaxy_boards:
+      hosts:
+        pi4:
+          ansible_host: 192.0.2.41
+          galaxy_config: ../.data/pi4-agent.json
+          galaxy_domain: galaxy-experiment
+        pi5:
+          ansible_host: 192.0.2.51
+          galaxy_config: ../.data/pi5-agent.json
+          galaxy_domain: galaxy-experiment
+      vars:
+        ansible_user: laboperator
+        galaxy_system: linux-kvm
+        galaxy_wheel: ../dist/side_galaxy-0.1.0-py3-none-any.whl

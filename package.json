@@ -1,0 +1,10 @@
+{
+  "name": "side-galaxy-workflow",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "spec": "OPENSPEC_TELEMETRY=0 DO_NOT_TRACK=1 openspec",
+    "spec:validate": "OPENSPEC_TELEMETRY=0 DO_NOT_TRACK=1 openspec validate --all --strict --no-interactive"
+  },
+  "devDependencies": { "@fission-ai/openspec": "1.13.2" }
+}

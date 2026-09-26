@@ -1,0 +1,1 @@
+{"id":"pi5","name":"Raspberry Pi 5","architecture":"aarch64","soc":"BCM2712 / Cortex-A76","expected_cores":4,"reserved_cpus":[0]}

@@ -1,0 +1,23 @@
+name: check
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  control-plane:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.6"
+          python-version: "3.12"
+      - run: uv sync --frozen
+      - run: uv run python -m unittest discover -s tests -v
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run spec:validate
+      - run: node --check src/side_galaxy/static/app.js
+      - run: uv build

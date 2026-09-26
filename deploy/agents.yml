@@ -1,0 +1,87 @@
+---
+- name: Install Side Galaxy agents on an enrolled Linux fleet
+  hosts: galaxy_boards
+  become: true
+  serial: 4
+  tasks:
+    - name: Check declared operating system family
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.os_family == 'Debian'
+          - galaxy_config is defined
+        fail_msg: This bootstrap playbook supports Debian-family Linux; add another OS playbook for other systems.
+    - name: Install Python runtime
+      ansible.builtin.apt:
+        name: [python3-venv, python3-pip]
+        state: present
+        update_cache: true
+    - name: Install KVM client only when requested
+      ansible.builtin.apt:
+        name: libvirt-clients
+        state: present
+      when: galaxy_system | default('linux-process') == 'linux-kvm'
+    - name: Create runtime account
+      ansible.builtin.user:
+        name: galaxy
+        system: true
+        create_home: true
+        home: /var/lib/side-galaxy
+    - name: Create installation directory
+      ansible.builtin.file:
+        path: /opt/side-galaxy
+        state: directory
+        mode: '0755'
+    - name: Copy built wheel
+      ansible.builtin.copy:
+        src: '{{ galaxy_wheel }}'
+        dest: /opt/side-galaxy/side_galaxy-0.1.0-py3-none-any.whl
+        mode: '0644'
+      notify: Restart agent
+    - name: Copy pinned dependencies
+      ansible.builtin.copy:
+        src: requirements.txt
+        dest: /opt/side-galaxy/requirements.txt
+        mode: '0644'
+      notify: Restart agent
+    - name: Create virtual environment
+      ansible.builtin.command:
+        cmd: python3 -m venv /opt/side-galaxy/venv
+        creates: /opt/side-galaxy/venv/bin/python
+    - name: Install pinned dependencies
+      ansible.builtin.pip:
+        requirements: /opt/side-galaxy/requirements.txt
+        virtualenv: /opt/side-galaxy/venv
+        extra_args: --require-hashes
+    - name: Install application wheel
+      ansible.builtin.pip:
+        name: /opt/side-galaxy/side_galaxy-0.1.0-py3-none-any.whl
+        virtualenv: /opt/side-galaxy/venv
+        extra_args: --no-deps --force-reinstall
+      notify: Restart agent
+    - name: Install board-specific private credentials
+      ansible.builtin.copy:
+        src: '{{ galaxy_config }}'
+        dest: /var/lib/side-galaxy/agent.json
+        owner: galaxy
+        group: galaxy
+        mode: '0600'
+      no_log: true
+      notify: Restart agent
+    - name: Install service
+      ansible.builtin.template:
+        src: galaxy-agent.service.j2
+        dest: /etc/systemd/system/galaxy-agent.service
+        mode: '0644'
+      notify: Restart agent
+    - name: Start agent
+      ansible.builtin.systemd_service:
+        name: galaxy-agent
+        enabled: true
+        state: started
+        daemon_reload: true
+  handlers:
+    - name: Restart agent
+      ansible.builtin.systemd_service:
+        name: galaxy-agent
+        state: restarted
+        daemon_reload: true
