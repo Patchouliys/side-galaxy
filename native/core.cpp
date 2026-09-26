@@ -1,0 +1,509 @@
+#include "side_galaxy_core.h"
+#include <nlohmann/json.hpp>
+#include <sqlite3.h>
+
+#include <algorithm>
+#include <chrono>
+#include <cstdlib>
+#include <cstring>
+#include <initializer_list>
+#include <limits>
+#include <map>
+#include <set>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+namespace {
+using Json = nlohmann::json;
+
+struct Error : std::runtime_error {
+    std::string kind;
+    Error(std::string type, std::string message) : std::runtime_error(std::move(message)), kind(std::move(type)) {}
+};
+
+[[noreturn]] void invalid(const char* message) { throw Error("invalid", message); }
+[[noreturn]] void missing() { throw Error("not_found", "Not found"); }
+[[noreturn]] void conflict(const std::string& message) { throw Error("conflict", message); }
+
+double now() {
+    return std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+void sql_check(int code) {
+    if (code == SQLITE_OK || code == SQLITE_DONE || code == SQLITE_ROW) return;
+    if ((code & 0xff) == SQLITE_CONSTRAINT) conflict("Database constraint rejected the operation");
+    if (code == SQLITE_BUSY || code == SQLITE_LOCKED) conflict("Database is busy; retry the same operation");
+    throw Error("internal", "SQLite operation failed (" + std::to_string(code) + ")");
+}
+
+class Database {
+    sqlite3* db_ = nullptr;
+    bool transaction_ = false;
+    // Statements are reused only within one call/connection; no shared connection or cache state.
+    std::map<std::string, sqlite3_stmt*, std::less<>> statements_;
+public:
+    explicit Database(const char* path) {
+        int code = sqlite3_open_v2(path, &db_, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nullptr);
+        if (code != SQLITE_OK) {
+            if (db_) sqlite3_close(db_);
+            db_ = nullptr;
+            sql_check(code);
+        }
+        sqlite3_busy_timeout(db_, 10000);
+        try {
+            // Pin durability across system SQLite builds instead of inheriting platform WAL defaults.
+            sql_check(sqlite3_exec(db_, "PRAGMA foreign_keys=ON;PRAGMA synchronous=FULL;PRAGMA checkpoint_fullfsync=ON",
+                                   nullptr, nullptr, nullptr));
+        }
+        catch (...) { sqlite3_close(db_); db_ = nullptr; throw; }
+    }
+    Database(const Database&) = delete;
+    Database& operator=(const Database&) = delete;
+    ~Database() {
+        if (transaction_) sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr);
+        for (const auto& [sql, statement] : statements_) sqlite3_finalize(statement);
+        if (db_) sqlite3_close(db_);
+    }
+    std::vector<Json> query(const char* sql, std::initializer_list<Json> values = {}) {
+        sqlite3_stmt* raw = nullptr;
+        if (const auto cached = statements_.find(sql); cached != statements_.end()) raw = cached->second;
+        else {
+            sql_check(sqlite3_prepare_v2(db_, sql, -1, &raw, nullptr));
+            try { statements_.emplace(sql, raw); }
+            catch (...) { sqlite3_finalize(raw); throw; }
+        }
+        struct Reset {
+            sqlite3_stmt* value;
+            ~Reset() { sqlite3_reset(value); sqlite3_clear_bindings(value); }
+        } reset{raw};
+        int index = 1;
+        for (const auto& value : values) {
+            int code;
+            if (value.is_null()) code = sqlite3_bind_null(raw, index);
+            else if (value.is_boolean()) code = sqlite3_bind_int(raw, index, value.get<bool>() ? 1 : 0);
+            else if (value.is_number_integer()) code = sqlite3_bind_int64(raw, index, value.get<sqlite3_int64>());
+            else if (value.is_number_float()) code = sqlite3_bind_double(raw, index, value.get<double>());
+            else if (value.is_string()) {
+                const auto& text = value.get_ref<const std::string&>();
+                if (text.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) invalid("SQL value is too large");
+                code = sqlite3_bind_text(raw, index, text.data(), static_cast<int>(text.size()), SQLITE_TRANSIENT);
+            } else invalid("SQL parameters must be scalar values");
+            sql_check(code);
+            ++index;
+        }
+        std::vector<Json> rows;
+        int code;
+        const int columns = sqlite3_column_count(raw);
+        while ((code = sqlite3_step(raw)) == SQLITE_ROW) {
+            Json row = Json::object();
+            for (int column = 0; column < columns; ++column) {
+                const char* key = sqlite3_column_name(raw, column);
+                switch (sqlite3_column_type(raw, column)) {
+                case SQLITE_NULL: row[key] = nullptr; break;
+                case SQLITE_INTEGER: row[key] = sqlite3_column_int64(raw, column); break;
+                case SQLITE_FLOAT: row[key] = sqlite3_column_double(raw, column); break;
+                case SQLITE_TEXT: {
+                    const auto* bytes = reinterpret_cast<const char*>(sqlite3_column_text(raw, column));
+                    row[key] = std::string(bytes, static_cast<std::size_t>(sqlite3_column_bytes(raw, column)));
+                    break;
+                }
+                default: throw Error("internal", "Unexpected database column type");
+                }
+            }
+            rows.push_back(std::move(row));
+        }
+        sql_check(code);
+        return rows;
+    }
+    void execute(const char* sql, std::initializer_list<Json> values = {}) { (void)query(sql, values); }
+    Json one(const char* sql, std::initializer_list<Json> values = {}) {
+        auto rows = query(sql, values);
+        return rows.empty() ? Json(nullptr) : std::move(rows.front());
+    }
+    void begin() { execute("BEGIN IMMEDIATE"); transaction_ = true; }
+    void commit() { execute("COMMIT"); transaction_ = false; }
+};
+
+void schema(Database& db) {
+    db.execute("CREATE TABLE IF NOT EXISTS boards ("
+               "id TEXT PRIMARY KEY,name TEXT NOT NULL,board_profile TEXT NOT NULL,"
+               "system_profile TEXT NOT NULL,token_hash TEXT NOT NULL,description TEXT,"
+               "seen REAL NOT NULL DEFAULT 0,quarantined INTEGER NOT NULL DEFAULT 0,"
+               "reload_requested INTEGER NOT NULL DEFAULT 0,reload_ack INTEGER NOT NULL DEFAULT 0,"
+               "reload_error TEXT,local INTEGER NOT NULL DEFAULT 0)");
+    db.execute("CREATE TABLE IF NOT EXISTS batches (id TEXT PRIMARY KEY,key TEXT UNIQUE NOT NULL,"
+               "plan TEXT NOT NULL,sha256 TEXT NOT NULL,created REAL NOT NULL)");
+    db.execute("CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY,"
+               "batch_id TEXT NOT NULL REFERENCES batches(id),board_id TEXT NOT NULL REFERENCES boards(id),"
+               "state TEXT NOT NULL,created REAL NOT NULL,started REAL,finished REAL,module_sha256 TEXT,result TEXT)");
+    db.execute("CREATE UNIQUE INDEX IF NOT EXISTS board_lease ON runs(board_id) "
+               "WHERE state IN ('queued','running','cancelling')");
+}
+
+std::string string_field(const Json& object, const char* name, std::size_t maximum = 256) {
+    const auto& value = object.at(name);
+    if (!value.is_string()) invalid("Expected a string field");
+    const auto& text = value.get_ref<const std::string&>();
+    if (text.empty() || text.size() > maximum || text.find('\0') != std::string::npos) invalid("Invalid string field");
+    return text;
+}
+
+bool hash_string(const std::string& value) {
+    return value.size() == 64 && std::all_of(value.begin(), value.end(), [](unsigned char c) {
+        return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+    });
+}
+
+std::string hash_field(const Json& value, const char* name) {
+    auto text = string_field(value, name, 64);
+    if (!hash_string(text)) invalid("Expected a lowercase SHA-256 digest");
+    return text;
+}
+
+bool constant_time_hash_equal(const std::string& left, const std::string& right) {
+    if (left.size() != 64 || right.size() != 64) return false;
+    unsigned difference = 0;
+    for (std::size_t i = 0; i < 64; ++i)
+        difference |= static_cast<unsigned char>(left[i]) ^ static_cast<unsigned char>(right[i]);
+    return difference == 0;
+}
+
+bool contains(const Json& values, const Json& wanted) {
+    return values.is_array() && std::find(values.begin(), values.end(), wanted) != values.end();
+}
+
+Json parsed(const Json& value, Json fallback = nullptr) {
+    return value.is_null() ? std::move(fallback) : Json::parse(value.get_ref<const std::string&>());
+}
+
+void validate_plan(const Json& plan) {
+    if (!plan.is_object() || plan.dump(-1, ' ', true).size() > 32768) invalid("Invalid or oversized plan");
+    const auto& boards = plan.at("boards");
+    const auto& cpus = plan.at("cpus");
+    const auto& interference = plan.at("interference_cpus");
+    if (!boards.is_array() || boards.empty() || boards.size() > 32) invalid("Invalid plan board list");
+    if (!cpus.is_array() || cpus.empty() || cpus.size() > 64 || !interference.is_array() || interference.size() > 64)
+        invalid("Invalid plan CPU lists");
+    std::set<std::string> unique_boards;
+    for (const auto& board : boards) {
+        if (!board.is_string() || board.get_ref<const std::string&>().empty()
+            || !unique_boards.insert(board.get<std::string>()).second) invalid("Invalid or duplicate board ID");
+    }
+    std::set<std::int64_t> unique_cores;
+    for (const auto* cores : {&cpus, &interference}) {
+        for (const auto& core : *cores) {
+            if (!core.is_number_integer() || core.get<std::int64_t>() < 0
+                || !unique_cores.insert(core.get<std::int64_t>()).second) invalid("CPU lists must be nonnegative, unique and disjoint");
+        }
+    }
+    const auto mode = string_field(plan, "template", 64);
+    if (!plan.at("duration_seconds").is_number_integer()) invalid("Invalid experiment duration");
+    auto duration = plan.at("duration_seconds").get<std::int64_t>();
+    if (duration < 1 || duration > (mode == "workload" ? 86400 : 120)) invalid("Invalid experiment duration");
+    if (mode == "workload") {
+        hash_field(plan, "artifact_sha256");
+        if (!interference.empty()) invalid("Workload must leave interference CPUs empty");
+    } else if (!plan.value("artifact_sha256", Json(nullptr)).is_null()
+               || !plan.value("arguments", Json::array()).empty() || !plan.value("environment", Json::object()).empty()) {
+        invalid("Artifact, arguments and environment require workload template");
+    }
+    for (const auto& pair : {std::pair{"memory_mib", 65536}, std::pair{"bandwidth_percent", 100}}) {
+        const auto value = plan.value(pair.first, Json(nullptr));
+        if (!value.is_null() && (!value.is_number_integer() || value.get<std::int64_t>() < (std::string_view(pair.first) == "memory_mib" ? 128 : 1)
+            || value.get<std::int64_t>() > pair.second)) invalid("Invalid resource limit");
+    }
+}
+
+void expire(Database& db) {
+    const double timestamp = now();
+    for (const auto& row : db.query("SELECT r.id,r.board_id,r.state,r.started,b.seen,ba.plan FROM runs r JOIN boards b ON b.id=r.board_id "
+                                    "JOIN batches ba ON ba.id=r.batch_id WHERE r.state IN ('queued','running','cancelling')")) {
+        const auto plan = parsed(row.at("plan"));
+        const double duration = plan.at("duration_seconds").get<double>();
+        const double grace = plan.at("template") == "workload" ? 180 : 45;
+        if (timestamp - row.at("seen").get<double>() > 30
+            || (!row.at("started").is_null() && timestamp - row.at("started").get<double>() > duration + grace)) {
+            db.execute("UPDATE runs SET state=?,finished=?,result=? WHERE id=?",
+                       {row.at("state") == "queued" ? "failed" : "lost", timestamp,
+                        Json{{"error", "agent heartbeat or execution deadline expired"}}.dump(), row.at("id")});
+            db.execute("UPDATE boards SET quarantined=1 WHERE id=?", {row.at("board_id")});
+        }
+    }
+}
+
+Json run_view(Json row) {
+    row["result"] = parsed(row.at("result"));
+    auto& result = row["result"];
+    if (result.is_object() && result.contains("outputs") && result["outputs"].is_array()) {
+        Json outputs = Json::array();
+        for (auto item : result["outputs"]) {
+            if (item.is_object()) {
+                item.erase("data_base64");
+                outputs.push_back(std::move(item));
+            }
+        }
+        result["outputs"] = std::move(outputs);
+    }
+    return row;
+}
+
+Json batch_view(Database& db, const Json& batch_id) {
+    auto result = db.one("SELECT * FROM batches WHERE id=?", {batch_id});
+    if (result.is_null()) missing();
+    result.erase("key");
+    result["plan"] = parsed(result.at("plan"));
+    result["runs"] = Json::array();
+    for (auto& row : db.query("SELECT * FROM runs WHERE batch_id=? ORDER BY created,id", {batch_id}))
+        result["runs"].push_back(run_view(std::move(row)));
+    return result;
+}
+
+Json check_plan(Database& db, const Json& payload) {
+    const auto& plan = payload.at("plan");
+    const auto plan_hash = hash_field(payload, "plan_sha256");
+    validate_plan(plan);
+    Json errors = Json::array(), targets = Json::array();
+    if (!plan.value("artifact_sha256", Json(nullptr)).is_null() && !payload.value("artifact_available", false))
+        errors.push_back({{"board_id", nullptr}, {"reasons", Json::array({"artifact unavailable; upload again"})}});
+    const double timestamp = now();
+    Json cores = plan.at("cpus");
+    for (const auto& core : plan.at("interference_cpus")) cores.push_back(core);
+    for (const auto& board_id : plan.at("boards")) {
+        const auto board = db.one("SELECT name,description,seen,quarantined,EXISTS(SELECT 1 FROM runs "
+                                  "WHERE board_id=boards.id AND state IN ('queued','running','cancelling')) AS occupied "
+                                  "FROM boards WHERE id=?", {board_id});
+        Json reasons = Json::array();
+        if (board.is_null()) {
+            errors.push_back({{"board_id", board_id}, {"reasons", Json::array({"unknown board"})}});
+            continue;
+        }
+        const auto description = parsed(board.at("description"), Json::object());
+        if (timestamp - board.at("seen").get<double>() > 30) reasons.push_back("board offline");
+        if (board.at("quarantined").get<int>()) reasons.push_back("board quarantined; verify cleanup before recovery");
+        if (board.at("occupied").get<int>()) reasons.push_back("board lease occupied");
+        bool unavailable = false, reserved = false;
+        const auto available_cores = description.value("cpus", Json::array());
+        const auto reserved_cores = description.value("reserved_cpus", Json::array());
+        for (const auto& core : cores) {
+            unavailable |= !contains(available_cores, core);
+            reserved |= contains(reserved_cores, core);
+        }
+        if (unavailable) reasons.push_back("CPU unavailable");
+        if (reserved) reasons.push_back("management CPU reserved");
+        if (!contains(description.value("templates", Json::array()), plan.at("template"))) reasons.push_back("template unsupported");
+        const auto caps = description.value("capabilities", Json::array());
+        if (!contains(caps, "cpu-affinity")) reasons.push_back("CPU affinity unsupported");
+        const auto memory = plan.value("memory_mib", Json(nullptr));
+        if (memory.is_null() && description.value("memory_limit_required", false)) reasons.push_back("module requires a memory limit");
+        if (!memory.is_null() && (!contains(caps, "memory-limit") || memory.get<double>() > description.value("memory_mib", 0.0)))
+            reasons.push_back("memory limit unsupported or exceeds available budget");
+        if (!plan.value("bandwidth_percent", Json(nullptr)).is_null() && !contains(caps, "bandwidth-limit"))
+            reasons.push_back("hardware bandwidth control unsupported");
+        if (!plan.at("interference_cpus").empty() && !contains(caps, "interference")) reasons.push_back("module does not support interferers");
+        if (!reasons.empty()) errors.push_back({{"board_id", board_id}, {"reasons", std::move(reasons)}});
+        targets.push_back({{"board_id", board_id}, {"name", board.at("name")}, {"mode", description.value("mode", Json(nullptr))},
+                           {"module_sha256", description.value("module_sha256", Json(nullptr))}});
+    }
+    return {{"valid", errors.empty()}, {"errors", std::move(errors)}, {"targets", std::move(targets)}, {"plan_sha256", plan_hash}};
+}
+
+Json dispatch(Database& db, const std::string& operation, const Json& payload) {
+    if (operation == "init") {
+        schema(db);
+        return {{"initialized", true}};
+    }
+    if (operation == "enroll") {
+        const auto id = string_field(payload, "board_id");
+        const auto& data = payload.at("data");
+        db.execute("INSERT INTO boards(id,name,board_profile,system_profile,token_hash,local) VALUES(?,?,?,?,?,?)",
+                   {id, string_field(data, "name"), string_field(data, "board_profile", 64), string_field(data, "system_profile", 64),
+                    hash_field(payload, "token_hash"), payload.value("local", false)});
+        return {{"board_id", id}};
+    }
+    if (operation == "agent_allowed") {
+        const auto row = db.one("SELECT token_hash FROM boards WHERE id=?", {string_field(payload, "board_id")});
+        return !row.is_null() && constant_time_hash_equal(row.at("token_hash").get<std::string>(), hash_field(payload, "token_hash"));
+    }
+    if (operation == "heartbeat") {
+        const auto id = string_field(payload, "board_id");
+        const auto& heartbeat = payload.at("heartbeat");
+        const auto& description = heartbeat.at("description");
+        if (!description.is_object()) invalid("Invalid module description");
+        hash_field(description, "module_sha256");
+        db.execute("UPDATE boards SET description=?,seen=?,reload_ack=?,reload_error=? WHERE id=?",
+                   {description.dump(), now(), heartbeat.value("reload_ack", 0), heartbeat.value("reload_error", Json(nullptr)), id});
+        auto result = db.one("SELECT reload_requested,quarantined FROM boards WHERE id=?", {id});
+        if (result.is_null()) missing();
+        return result;
+    }
+    if (operation == "boards") {
+        expire(db);
+        Json result = Json::array();
+        const double timestamp = now();
+        for (auto board : db.query("SELECT b.*,r.id AS active_run FROM boards b LEFT JOIN runs r ON b.id=r.board_id "
+                                   "AND r.state IN ('queued','running','cancelling') ORDER BY b.name")) {
+            board.erase("token_hash");
+            board["description"] = parsed(board.at("description"));
+            board["status"] = board.at("quarantined").get<int>() ? "quarantined"
+                : timestamp - board.at("seen").get<double>() > 30 ? "offline"
+                : !board.at("active_run").is_null() ? "busy" : "ready";
+            result.push_back(std::move(board));
+        }
+        return result;
+    }
+    if (operation == "preflight") {
+        expire(db);
+        return check_plan(db, payload);
+    }
+    if (operation == "submit") {
+        expire(db);
+        const auto key = string_field(payload, "key", 128);
+        const auto plan_hash = hash_field(payload, "plan_sha256");
+        const auto previous = db.one("SELECT id,sha256 FROM batches WHERE key=?", {key});
+        if (!previous.is_null()) {
+            if (previous.at("sha256") != plan_hash) conflict("Idempotency key belongs to a different plan");
+            return batch_view(db, previous.at("id"));
+        }
+        const auto checked = check_plan(db, payload);
+        if (!checked.at("valid").get<bool>()) conflict(checked.dump());
+        const auto id = string_field(payload, "batch_id");
+        const auto& runs = payload.at("run_ids");
+        const auto& targets = checked.at("targets");
+        if (!runs.is_array() || runs.size() != targets.size()) invalid("One run ID is required per board");
+        std::set<std::string> unique_runs;
+        for (const auto& run : runs) {
+            if (!run.is_string() || run.get_ref<const std::string&>().empty() || run.get_ref<const std::string&>().size() > 256
+                || !unique_runs.insert(run.get<std::string>()).second) invalid("Invalid or duplicate run ID");
+        }
+        const double timestamp = now();
+        db.execute("INSERT INTO batches(id,key,plan,sha256,created) VALUES(?,?,?,?,?)",
+                   {id, key, payload.at("plan").dump(), plan_hash, timestamp});
+        for (std::size_t index = 0; index < targets.size(); ++index)
+            db.execute("INSERT INTO runs(id,batch_id,board_id,state,created,module_sha256) VALUES(?,?,?,?,?,?)",
+                       {runs[index], id, targets[index].at("board_id"), "queued", timestamp, targets[index].at("module_sha256")});
+        return batch_view(db, id);
+    }
+    if (operation == "batch") {
+        expire(db);
+        return batch_view(db, string_field(payload, "batch_id"));
+    }
+    if (operation == "batches") {
+        expire(db);
+        Json result = Json::array();
+        for (const auto& row : db.query("SELECT id FROM batches ORDER BY created DESC LIMIT 100"))
+            result.push_back(batch_view(db, row.at("id")));
+        return result;
+    }
+    if (operation == "poll") {
+        expire(db);
+        const auto id = string_field(payload, "board_id");
+        const auto board = db.one("SELECT * FROM boards WHERE id=?", {id});
+        if (board.is_null() || board.at("quarantined").get<int>()) return nullptr;
+        auto row = db.one("SELECT * FROM runs WHERE board_id=? AND state IN ('queued','running','cancelling')", {id});
+        if (row.is_null()) return nullptr;
+        const bool claimed = row.at("state") == "queued";
+        if (claimed) {
+            const auto description = parsed(board.at("description"), Json::object());
+            if (description.value("module_sha256", Json(nullptr)) != row.at("module_sha256")) {
+                db.execute("UPDATE runs SET state='failed',finished=?,result=? WHERE id=?",
+                           {now(), Json{{"error", "module changed after admission; submit again"}}.dump(), row.at("id")});
+                return nullptr;
+            }
+            db.execute("UPDATE runs SET state='running',started=? WHERE id=?", {now(), row.at("id")});
+            row = db.one("SELECT * FROM runs WHERE id=?", {row.at("id")});
+        }
+        auto result = run_view(std::move(row));
+        result["claimed"] = claimed;
+        result["plan"] = parsed(db.one("SELECT plan FROM batches WHERE id=?", {result.at("batch_id")}).at("plan"));
+        return result;
+    }
+    if (operation == "finish") {
+        const auto id = string_field(payload, "run_id");
+        auto row = db.one("SELECT * FROM runs WHERE id=? AND board_id=?", {id, string_field(payload, "board_id")});
+        if (row.is_null()) missing();
+        const auto& completion = payload.at("completion");
+        if (row.at("state") == "queued") conflict("Run must be claimed before completion");
+        if (hash_field(completion, "module_sha256") != row.at("module_sha256").get<std::string>()) conflict("Module generation mismatch");
+        const auto state = row.at("state").get<std::string>();
+        if (state == "succeeded" || state == "failed" || state == "cancelled" || state == "lost") return run_view(std::move(row));
+        const bool clean = completion.at("cleanup_ok").get<bool>();
+        auto final_state = string_field(completion, "state", 16);
+        if (final_state != "succeeded" && final_state != "failed" && final_state != "cancelled") invalid("Invalid completion state");
+        if (!completion.at("result").is_object()) invalid("Completion result must be an object");
+        if (state == "cancelling" && clean) final_state = "cancelled";
+        if (!clean) {
+            final_state = "failed";
+            db.execute("UPDATE boards SET quarantined=1 WHERE id=?", {payload.at("board_id")});
+        }
+        db.execute("UPDATE runs SET state=?,finished=?,result=? WHERE id=?",
+                   {final_state, now(), completion.at("result").dump(), id});
+        return run_view(db.one("SELECT * FROM runs WHERE id=?", {id}));
+    }
+    if (operation == "cancel") {
+        const auto id = string_field(payload, "batch_id");
+        if (db.one("SELECT 1 FROM batches WHERE id=?", {id}).is_null()) missing();
+        db.execute("UPDATE runs SET state='cancelled',finished=? WHERE batch_id=? AND state='queued'", {now(), id});
+        db.execute("UPDATE runs SET state='cancelling' WHERE batch_id=? AND state='running'", {id});
+        expire(db);
+        return batch_view(db, id);
+    }
+    if (operation == "board_action") {
+        const auto id = string_field(payload, "board_id");
+        const auto action = string_field(payload, "action", 16);
+        if (db.one("SELECT 1 FROM boards WHERE id=?", {id}).is_null()) missing();
+        if (action == "reload") db.execute("UPDATE boards SET reload_requested=reload_requested+1 WHERE id=?", {id});
+        else if (action == "recover") {
+            if (!db.one("SELECT 1 FROM runs WHERE board_id=? AND state IN ('queued','running','cancelling')", {id}).is_null())
+                conflict("Active run must be stopped before recovery");
+            db.execute("UPDATE boards SET quarantined=0 WHERE id=?", {id});
+        } else invalid("Unknown board action");
+        return {{"board_id", id}, {"action", action}};
+    }
+    invalid("Unknown core operation");
+}
+
+char* allocate_response(const Json& value) {
+    const auto text = value.dump();
+    auto* output = static_cast<char*>(std::malloc(text.size() + 1));
+    if (!output) return nullptr;
+    std::memcpy(output, text.c_str(), text.size() + 1);
+    return output;
+}
+} // namespace
+
+extern "C" int sg_core_abi_version(void) { return 1; }
+
+extern "C" char* sg_core_call(const char* db_path, const char* operation, const char* payload_json) {
+    try {
+        Json response;
+        try {
+            if (!db_path || !*db_path || !operation || !payload_json || std::strlen(operation) > 64
+                || std::strlen(payload_json) > 8 * 1024 * 1024) invalid("Invalid core call arguments");
+            const auto payload = Json::parse(payload_json);
+            if (!payload.is_object()) invalid("Core payload must be an object");
+            Database database(db_path);
+            // WAL mode is persistent and must be selected before opening the schema transaction.
+            if (std::string_view(operation) == "init") database.execute("PRAGMA journal_mode=WAL");
+            database.begin();
+            auto value = dispatch(database, operation, payload);
+            database.commit();
+            response = {{"ok", true}, {"value", std::move(value)}};
+        } catch (const Error& error) {
+            response = {{"ok", false}, {"error", {{"kind", error.kind}, {"message", error.what()}}}};
+        } catch (const Json::exception&) {
+            response = {{"ok", false}, {"error", {{"kind", "invalid"}, {"message", "Invalid core JSON payload"}}}};
+        } catch (const std::exception&) {
+            response = {{"ok", false}, {"error", {{"kind", "internal"}, {"message", "Core operation failed"}}}};
+        } catch (...) {
+            response = {{"ok", false}, {"error", {{"kind", "internal"}, {"message", "Unknown core failure"}}}};
+        }
+        return allocate_response(response);
+    } catch (...) {
+        return nullptr; // Even allocation failure cannot propagate through a C ABI.
+    }
+}
+
+extern "C" void sg_core_free(char* result) { std::free(result); }

@@ -7,10 +7,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install native build dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake build-essential libsqlite3-dev
       - uses: astral-sh/setup-uv@v6
         with:
           version: "0.11.6"
           python-version: "3.12"
+      - name: Build and test native engine
+        run: |
+          cmake -S . -B build/native-test -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+          cmake --build build/native-test --parallel 2
+          ctest --test-dir build/native-test --output-on-failure
       - run: uv sync --frozen
       - run: uv run python -m unittest discover -s tests -v
       - uses: actions/setup-node@v4
@@ -22,3 +29,23 @@ jobs:
       - run: node --check src/side_galaxy/static/app.js
       - run: node --check src/side_galaxy/static/homepage.js
       - run: uv build
+      - name: Verify platform wheel and source contents
+        run: |
+          uv run python - <<'PY'
+          from pathlib import Path
+          import tarfile
+          import zipfile
+          wheel, = Path('dist').glob('*.whl')
+          assert '-py3-none-linux_' in wheel.name and not wheel.name.endswith('-any.whl')
+          with zipfile.ZipFile(wheel) as archive:
+              assert 'side_galaxy/_native/libside_galaxy_core.so' in archive.namelist()
+              metadata = next(name for name in archive.namelist() if name.endswith('.dist-info/WHEEL'))
+              assert 'Root-Is-Purelib: false' in archive.read(metadata).decode()
+              assert any(name.endswith('/licenses/native/vendor/nlohmann/LICENSE.MIT') for name in archive.namelist())
+          source, = Path('dist').glob('*.tar.gz')
+          with tarfile.open(source) as archive:
+              names = archive.getnames()
+              for suffix in ('/hatch_build.py', '/CMakeLists.txt', '/native/core.cpp', '/native/vendor/nlohmann/json.hpp'):
+                  assert any(name.endswith(suffix) for name in names), suffix
+              assert not any('/_native/' in name for name in names)
+          PY

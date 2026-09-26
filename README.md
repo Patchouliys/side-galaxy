@@ -16,9 +16,22 @@ Side Galaxy includes Raspberry Pi 4 / Pi 5 profiles and Linux / KVM execution mo
 - **Connect people and AI:** a Web console, scriptable CLI, and MCP stdio tools use the same API and authorization rules.
 - **Deploy centrally:** a containerized control server and an Ansible playbook for Debian-family board agents.
 
+## Architecture
+
+The C++20 core uses SQLite for board registration, capability admission, atomic batches, leases, and task-state transitions. Python bridges HTTP, CLI, and MCP to that core, handles artifact I/O, and hosts the execution-plugin protocol.
+
+The native core is required; there is no Python scheduling fallback. Board and system support remains in profiles and execution modules.
+
 ## Quick start
 
-Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
+Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/). Building from source also requires CMake 3.20+, a C++20 compiler, and SQLite development headers.
+
+| Platform | Build prerequisites |
+|---|---|
+| macOS | Xcode Command Line Tools (`xcode-select --install`) and CMake |
+| Debian / Ubuntu | `sudo apt-get install build-essential cmake libsqlite3-dev` |
+
+`uv sync` builds the required native library. See [native build instructions](docs/native-build.md) for toolchain setup and platform-specific packages.
 
 ```sh
 uv sync --frozen
@@ -69,6 +82,7 @@ Configure a compatible MCP client to run `sg mcp`, with `SG_SERVER` and `SG_TOKE
 
 The detailed guides are written in English.
 
+- [Native core build and packaging](docs/native-build.md)
 - [Deployment and AI integration](docs/operations.md)
 - [Experiment bundles, dependencies, and results](docs/workloads.md)
 - [Linux / KVM execution and guest setup](docs/kvm-workloads.md)

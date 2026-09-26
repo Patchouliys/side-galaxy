@@ -9,10 +9,14 @@
         that:
           - ansible_facts.os_family == 'Debian'
           - galaxy_config is defined
+          - galaxy_wheel is defined
+          - galaxy_wheel | length > 0
+          - galaxy_wheel | basename is match('^side_galaxy-.*\.whl$')
+          - not galaxy_wheel.endswith('-any.whl')
         fail_msg: This bootstrap playbook supports Debian-family Linux; add another OS playbook for other systems.
-    - name: Install Python runtime
+    - name: Install Python and native library runtimes
       ansible.builtin.apt:
-        name: [python3-venv, python3-pip]
+        name: [python3-venv, python3-pip, libsqlite3-0, libstdc++6]
         state: present
         update_cache: true
     - name: Install KVM client only when requested
@@ -34,7 +38,7 @@
     - name: Copy built wheel
       ansible.builtin.copy:
         src: '{{ galaxy_wheel }}'
-        dest: /opt/side-galaxy/side_galaxy-0.1.0-py3-none-any.whl
+        dest: '/opt/side-galaxy/{{ galaxy_wheel | basename }}'
         mode: '0644'
       notify: Restart agent
     - name: Copy pinned dependencies
@@ -54,7 +58,7 @@
         extra_args: --require-hashes
     - name: Install application wheel
       ansible.builtin.pip:
-        name: /opt/side-galaxy/side_galaxy-0.1.0-py3-none-any.whl
+        name: '/opt/side-galaxy/{{ galaxy_wheel | basename }}'
         virtualenv: /opt/side-galaxy/venv
         extra_args: --no-deps --force-reinstall
       notify: Restart agent

@@ -1,6 +1,6 @@
 # Tests and Checks
 
-Run the following commands from the repository root. Requirements are Python 3.11+, uv, and Node.js / npm for OpenSpec.
+Run the following commands from the repository root. Requirements are Python 3.11+, uv, CMake 3.20+, a C++20 compiler, SQLite development headers, and Node.js / npm for OpenSpec. See the [native build guide](native-build.md) for platform toolchains.
 
 ## Install Development Dependencies
 
@@ -8,6 +8,8 @@ Run the following commands from the repository root. Requirements are Python 3.1
 uv sync --frozen
 npm ci --ignore-scripts
 ```
+
+`uv sync` builds and installs the required native library. Python interface tests invoke the C++ core through the native bridge; a missing or incompatible library fails directly instead of using a Python scheduler substitute.
 
 ## Automated Tests and Specification Checks
 
@@ -23,6 +25,18 @@ To select a test file, for example:
 ```sh
 uv run python -m unittest discover -s tests -p 'test_execution_transport.py' -v
 ```
+
+## Native Core Tests
+
+Build the C++ core separately and run CTest:
+
+```sh
+cmake -S . -B build/native-check -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON
+cmake --build build/native-check
+ctest --test-dir build/native-check --output-on-failure
+```
+
+This build directory is for native tests. `uv sync` manages the native library installed in the Python environment; after changing C++ sources, rerun `uv sync --frozen` before running Python interface tests.
 
 ## HTTP, CLI, MCP, and Agent Integration
 
@@ -47,4 +61,4 @@ uv build
 ansible-playbook --syntax-check -i deploy/inventory.example.yml deploy/agents.yml
 ```
 
-Ansible syntax checks require Ansible on the control machine.
+Ansible syntax checks require Ansible on the control machine. The wheel contains a platform-native library and should be built in an environment compatible with the target CPU architecture and system ABI.

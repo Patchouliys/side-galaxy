@@ -19,3 +19,5 @@ build/
 *.key
 artifacts/
 deploy/inventory.local.yml
+src/side_galaxy/_native/
+native/build/

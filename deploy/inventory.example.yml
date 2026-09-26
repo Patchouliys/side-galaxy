@@ -13,4 +13,9 @@ all:
       vars:
         ansible_user: laboperator
         galaxy_system: linux-kvm
-        galaxy_wheel: ../dist/side_galaxy-0.1.0-py3-none-any.whl
+        # Build on a compatible Linux distribution for each target architecture.
+        galaxy_wheels:
+          aarch64: ../dist/side_galaxy-0.1.0-py3-none-linux_aarch64.whl
+          x86_64: ../dist/side_galaxy-0.1.0-py3-none-linux_x86_64.whl
+        # A host can override galaxy_wheel directly when it uses a different build.
+        galaxy_wheel: "{{ galaxy_wheels.get(ansible_facts.architecture, '') }}"

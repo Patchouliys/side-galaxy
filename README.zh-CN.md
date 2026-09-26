@@ -16,9 +16,22 @@
 - **连接人与 AI：** Web 控制台、可脚本化 CLI 与 MCP stdio 工具共用 API 和鉴权规则。
 - **批量部署：** 容器化控制服务器，以及面向 Debian 系 Linux 板端代理的 Ansible 部署入口。
 
+## 架构
+
+C++20 核心通过 SQLite 管理板卡注册、能力准入、原子批次、租约与任务状态迁移。Python 将 HTTP、CLI 和 MCP 桥接到该核心，处理制品 I/O，并承载执行插件协议。
+
+原生核心是必需组件，不提供 Python 调度回退。板型和系统支持仍通过配置清单与执行模块扩展。
+
 ## 快速开始
 
-需要 Python 3.11+ 和 [uv](https://docs.astral.sh/uv/)。
+需要 Python 3.11+ 和 [uv](https://docs.astral.sh/uv/)。从源码安装还需 CMake 3.20+、支持 C++20 的编译器和 SQLite 开发头文件。
+
+| 平台 | 构建依赖 |
+|---|---|
+| macOS | Xcode Command Line Tools（`xcode-select --install`）及 CMake |
+| Debian / Ubuntu | `sudo apt-get install build-essential cmake libsqlite3-dev` |
+
+`uv sync` 会构建必需的原生库。工具链配置与平台安装包说明见[原生构建指南](docs/native-build.md)。
 
 ```sh
 uv sync --frozen
@@ -67,6 +80,7 @@ uv run sg artifact-upload .data/hello-workload.zip
 
 ## 文档
 
+- [原生核心构建与打包](docs/native-build.md)
 - [运行、部署与 AI 连接](docs/operations.md)
 - [实验代码、依赖与结果](docs/workloads.md)
 - [Linux / KVM 执行与 guest 配置](docs/kvm-workloads.md)

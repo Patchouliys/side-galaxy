@@ -1,18 +1,22 @@
 # Side Galaxy Architecture and Resource Model
 
-Side Galaxy consists of a control server, board agents, board/system profiles, and execution modules. The server stores devices, experiment plans, leases, artifacts, and results centrally; agents actively poll for tasks and invoke pinned execution-module versions on target devices.
+Side Galaxy consists of a C++20 control core, Python interface and execution bridges, board/system profiles, and execution modules. The control core uses SQLite to store and manage boards, capability admission, atomic batches, leases, and task state; Python handles HTTP / CLI / MCP, artifact file I/O, and the execution-plugin protocol.
+
+Board agents actively poll for tasks and invoke pinned execution-module versions on target devices. The native core is required; a missing or unloadable native library produces an error rather than switching to a Python scheduler.
 
 ## Service Flow
 
 ```mermaid
 flowchart TB
-  Web[Web console] --> API[Control plane API]
-  CLI[sg CLI] --> API
-  AI[AI client] --> MCP[MCP stdio]
+  Web[Web console] --> API[Python HTTP bridge]
+  CLI[Python sg CLI] --> API
+  AI[AI client] --> MCP[Python MCP stdio]
   MCP --> API
-  API --> DB[(SQLite plans / leases / results)]
-  API --> Artifacts[SHA-256 artifact store]
-  Agent[Board agent] --> API
+  API --> Core[C++20 control core]
+  Core --> DB[(SQLite boards / admission / batches / leases / task state)]
+  API --> Artifacts[Python artifact I/O]
+  Artifacts --> Files[SHA-256 artifact files]
+  Agent[Python board agent / plugin protocol] --> API
   Board[Board profile] --> Agent
   OS[System profile] --> Agent
   Agent --> Module[Pinned execution module]
@@ -20,7 +24,9 @@ flowchart TB
   Module --> KVM[KVM guest execution / live affinity]
 ```
 
-Web, CLI, and MCP share admission rules. Batch submission checks all targets' capabilities, resources, and occupancy within one transaction; each board holds at most one experiment lease. Resources are released after the agent confirms completion and cleanup. Unknown execution state triggers quarantine to prevent new experiments from starting on a board that may still be running a workload.
+Scheduling requests from Web, CLI, and MCP enter the same native core. Within a SQLite transaction, C++ checks every target's capabilities, resources, and occupancy before creating a batch and per-board leases; Python does not duplicate scheduling rules. Each board holds at most one experiment lease. Once the agent returns execution and cleanup results, the core handles terminal state and resource release. Unknown execution state triggers quarantine to prevent new experiments from starting on a board that may still be running a workload.
+
+Python retains network interfaces, authentication integration, request serialization, artifact transfer, and plugin invocation. Execution modules discover and report resource capabilities; the C++ core decides admission, occupancy, and task transitions. See the [native build guide](native-build.md) for compilation and shared-library installation.
 
 Multi-board deployment and experiments use the Ansible playbook and batch API, respectively. Boards begin execution independently; synchronized sampling requires the experiment's own clock and barrier protocol.
 

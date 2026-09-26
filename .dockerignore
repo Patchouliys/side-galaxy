@@ -1,5 +1,11 @@
 *
 !pyproject.toml
+!hatch_build.py
+!CMakeLists.txt
+!LICENSE
+!THIRD_PARTY.md
+!native
+!native/**
 !src
 !src/**
 !deploy
@@ -7,3 +13,5 @@
 !deploy/Dockerfile
 **/__pycache__
 **/*.pyc
+src/side_galaxy/_native/**
+native/build/**
