@@ -134,6 +134,11 @@ void schema(Database& db) {
                "seen REAL NOT NULL DEFAULT 0,quarantined INTEGER NOT NULL DEFAULT 0,"
                "reload_requested INTEGER NOT NULL DEFAULT 0,reload_ack INTEGER NOT NULL DEFAULT 0,"
                "reload_error TEXT,local INTEGER NOT NULL DEFAULT 0)");
+    bool maintenance_column = false;
+    for (const auto& column : db.query("PRAGMA table_info(boards)"))
+        maintenance_column |= column.at("name") == "maintenance";
+    if (!maintenance_column) db.execute("ALTER TABLE boards ADD COLUMN maintenance TEXT");
+    db.execute("CREATE TABLE IF NOT EXISTS workspace_settings (id INTEGER PRIMARY KEY CHECK(id=1),demo INTEGER NOT NULL)");
     db.execute("CREATE TABLE IF NOT EXISTS batches (id TEXT PRIMARY KEY,key TEXT UNIQUE NOT NULL,"
                "plan TEXT NOT NULL,sha256 TEXT NOT NULL,created REAL NOT NULL)");
     db.execute("CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY,"
@@ -177,6 +182,29 @@ bool contains(const Json& values, const Json& wanted) {
 
 Json parsed(const Json& value, Json fallback = nullptr) {
     return value.is_null() ? std::move(fallback) : Json::parse(value.get_ref<const std::string&>());
+}
+
+// Classification also covers old boards whose module description has not arrived yet.
+bool synthetic_board(const Json& board) {
+    return board.value("local", 0) != 0 || board.value("system_profile", std::string()) == "simulator"
+        || parsed(board.value("description", Json(nullptr)), Json::object()).value("mode", std::string()) == "synthetic";
+}
+
+bool demo_enabled(Database& db) {
+    const auto setting = db.one("SELECT demo FROM workspace_settings WHERE id=1");
+    // Direct Store users retain compatibility; the HTTP server explicitly chooses its startup policy.
+    return setting.is_null() || setting.at("demo").get<int>() != 0;
+}
+
+bool reload_pending(const Json& board) {
+    return board.at("reload_requested").get<int>() > board.at("reload_ack").get<int>()
+        || (board.at("reload_requested").get<int>() > 0 && !board.at("reload_error").is_null());
+}
+
+void cancel_board(Database& db, const Json& board_id, const char* reason) {
+    db.execute("UPDATE runs SET state='cancelled',finished=?,result=? WHERE board_id=? AND state='queued'",
+               {now(), Json{{"error", reason}, {"code_executed", false}, {"cleanup_ok", true}}.dump(), board_id});
+    db.execute("UPDATE runs SET state='cancelling' WHERE board_id=? AND state='running'", {board_id});
 }
 
 void validate_plan(const Json& plan) {
@@ -296,10 +324,12 @@ Json check_plan(Database& db, const Json& payload) {
     if (!plan.value("artifact_sha256", Json(nullptr)).is_null() && !payload.value("artifact_available", false))
         errors.push_back({{"board_id", nullptr}, {"reasons", Json::array({"artifact unavailable; upload again"})}});
     const double timestamp = now();
+    const bool demo = demo_enabled(db);
     Json cores = plan.at("cpus");
     for (const auto& core : plan.at("interference_cpus")) cores.push_back(core);
     for (const auto& board_id : plan.at("boards")) {
-        const auto board = db.one("SELECT name,description,seen,quarantined,EXISTS(SELECT 1 FROM runs "
+        const auto board = db.one("SELECT name,description,seen,quarantined,local,system_profile,maintenance,"
+                                  "reload_requested,reload_ack,reload_error,EXISTS(SELECT 1 FROM runs "
                                   "WHERE board_id=boards.id AND state IN ('queued','running','cancelling')) AS occupied "
                                   "FROM boards WHERE id=?", {board_id});
         Json reasons = Json::array();
@@ -308,6 +338,9 @@ Json check_plan(Database& db, const Json& payload) {
             continue;
         }
         const auto description = parsed(board.at("description"), Json::object());
+        if (!demo && synthetic_board(board)) reasons.push_back("demo mode disabled; synthetic admission is blocked");
+        if (!board.at("maintenance").is_null()) reasons.push_back("board restart maintenance is pending");
+        if (reload_pending(board)) reasons.push_back("module reload pending or failed; await a successful acknowledgement");
         if (timestamp - board.at("seen").get<double>() > 30) reasons.push_back("board offline");
         if (board.at("quarantined").get<int>()) reasons.push_back("board quarantined; verify cleanup before recovery");
         if (board.at("occupied").get<int>()) reasons.push_back("board lease occupied");
@@ -344,6 +377,15 @@ Json dispatch(Database& db, const std::string& operation, const Json& payload) {
         schema(db);
         return {{"initialized", true}};
     }
+    if (operation == "workspace_mode") return {{"demo", demo_enabled(db)}};
+    if (operation == "set_workspace_mode") {
+        const bool enabled = payload.at("enabled").get<bool>();
+        db.execute("INSERT INTO workspace_settings(id,demo) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET demo=excluded.demo", {enabled});
+        if (!enabled)
+            for (const auto& board : db.query("SELECT local,system_profile,description,id FROM boards"))
+                if (synthetic_board(board)) cancel_board(db, board.at("id"), "Demo mode disabled");
+        return {{"demo", enabled}};
+    }
     if (operation == "enroll") {
         const auto id = string_field(payload, "board_id");
         const auto& data = payload.at("data");
@@ -362,7 +404,7 @@ Json dispatch(Database& db, const std::string& operation, const Json& payload) {
         const auto& description = heartbeat.at("description");
         if (!description.is_object()) invalid("Invalid module description");
         hash_field(description, "module_sha256");
-        db.execute("UPDATE boards SET description=?,seen=?,reload_ack=?,reload_error=? WHERE id=?",
+        db.execute("UPDATE boards SET description=?,seen=?,reload_ack=MIN(?,reload_requested),reload_error=? WHERE id=?",
                    {description.dump(), now(), heartbeat.value("reload_ack", 0), heartbeat.value("reload_error", Json(nullptr)), id});
         auto result = db.one("SELECT reload_requested,quarantined FROM boards WHERE id=?", {id});
         if (result.is_null()) missing();
@@ -376,9 +418,11 @@ Json dispatch(Database& db, const std::string& operation, const Json& payload) {
                                    "AND r.state IN ('queued','running','cancelling') ORDER BY b.name")) {
             board.erase("token_hash");
             board["description"] = parsed(board.at("description"));
-            board["status"] = board.at("quarantined").get<int>() ? "quarantined"
+            board["maintenance"] = parsed(board.at("maintenance"));
+            board["status"] = !board.at("maintenance").is_null() ? "maintenance"
+                : board.at("quarantined").get<int>() ? "quarantined"
                 : timestamp - board.at("seen").get<double>() > 30 ? "offline"
-                : !board.at("active_run").is_null() ? "busy" : "ready";
+                : !board.at("active_run").is_null() ? "busy" : reload_pending(board) ? "reloading" : "ready";
             result.push_back(std::move(board));
         }
         return result;
@@ -422,7 +466,12 @@ Json dispatch(Database& db, const std::string& operation, const Json& payload) {
     if (operation == "batches") {
         expire(db);
         Json result = Json::array();
-        for (const auto& row : db.query("SELECT id FROM batches ORDER BY created DESC LIMIT 100"))
+        const char* query = payload.value("real_only", false)
+            ? "SELECT b.id FROM batches b WHERE EXISTS(SELECT 1 FROM runs r JOIN boards d ON d.id=r.board_id "
+              "WHERE r.batch_id=b.id AND d.local=0 AND d.system_profile!='simulator' "
+              "AND COALESCE(json_extract(d.description,'$.mode'),'')!='synthetic') ORDER BY b.created DESC LIMIT 100"
+            : "SELECT id FROM batches ORDER BY created DESC LIMIT 100";
+        for (const auto& row : db.query(query))
             result.push_back(batch_view(db, row.at("id")));
         return result;
     }
@@ -430,9 +479,15 @@ Json dispatch(Database& db, const std::string& operation, const Json& payload) {
         expire(db);
         const auto id = string_field(payload, "board_id");
         const auto board = db.one("SELECT * FROM boards WHERE id=?", {id});
-        if (board.is_null() || board.at("quarantined").get<int>()) return nullptr;
+        if (board.is_null()) return nullptr;
         auto row = db.one("SELECT * FROM runs WHERE board_id=? AND state IN ('queued','running','cancelling')", {id});
         if (row.is_null()) return nullptr;
+        if (!demo_enabled(db) && synthetic_board(board)) {
+            cancel_board(db, id, "Demo mode disabled");
+            row = db.one("SELECT * FROM runs WHERE board_id=? AND state IN ('running','cancelling')", {id});
+            if (row.is_null()) return nullptr;
+        }
+        if ((board.at("quarantined").get<int>() || !board.at("maintenance").is_null()) && row.at("state") != "cancelling") return nullptr;
         const bool claimed = row.at("state") == "queued";
         if (claimed) {
             const auto description = parsed(board.at("description"), Json::object());
@@ -482,12 +537,57 @@ Json dispatch(Database& db, const std::string& operation, const Json& payload) {
     if (operation == "board_action") {
         const auto id = string_field(payload, "board_id");
         const auto action = string_field(payload, "action", 16);
-        if (db.one("SELECT 1 FROM boards WHERE id=?", {id}).is_null()) missing();
-        if (action == "reload") db.execute("UPDATE boards SET reload_requested=reload_requested+1 WHERE id=?", {id});
+        const auto board = db.one("SELECT * FROM boards WHERE id=?", {id});
+        if (board.is_null()) missing();
+        if (action == "reload" || action == "force-reload") {
+            db.execute("UPDATE boards SET reload_requested=reload_requested+1,reload_error=NULL WHERE id=?", {id});
+            if (action == "force-reload") cancel_board(db, id, "Forced module reload");
+        }
         else if (action == "recover") {
+            if (!board.at("maintenance").is_null()) conflict("Restart maintenance must complete before recovery");
             if (!db.one("SELECT 1 FROM runs WHERE board_id=? AND state IN ('queued','running','cancelling')", {id}).is_null())
                 conflict("Active run must be stopped before recovery");
             db.execute("UPDATE boards SET quarantined=0 WHERE id=?", {id});
+        } else if (action == "restart") {
+            auto maintenance = parsed(board.at("maintenance"));
+            if (maintenance.is_null()) {
+                const auto description = parsed(board.at("description"), Json::object());
+                Json runs = Json::array();
+                for (const auto& run : db.query("SELECT id FROM runs WHERE board_id=? AND state IN ('queued','running','cancelling')", {id}))
+                    runs.push_back(run.at("id"));
+                maintenance = {{"restart_id", string_field(payload, "restart_id", 64)}, {"started", now()},
+                               {"previous_quarantined", board.at("quarantined").get<int>() != 0}, {"run_ids", runs},
+                               {"mode", description.value("mode", std::string())},
+                               {"cleanup_scope", description.value("cleanup_scope", std::string("external"))}};
+                db.execute("UPDATE boards SET maintenance=?,quarantined=1 WHERE id=?", {maintenance.dump(), id});
+                cancel_board(db, id, "Guest restart requested");
+            }
+            return {{"board_id", id}, {"action", action}, {"restart_id", maintenance.at("restart_id")}};
+        } else if (action == "restart-complete") {
+            const auto maintenance = parsed(board.at("maintenance"));
+            if (maintenance.is_null() || maintenance.at("restart_id") != string_field(payload, "restart_id", 64))
+                conflict("Restart maintenance identity mismatch");
+            const auto before = string_field(payload, "boot_id_before", 64), after = string_field(payload, "boot_id_after", 64);
+            if (before == after || !payload.value("agent_ready", false)) conflict("Fresh guest boot and agent readiness are required");
+            if (maintenance.at("mode") != "linux-process" || maintenance.at("cleanup_scope") != "process-group")
+                conflict("Guest reboot cannot confirm this module's external resource cleanup");
+            Json evidence = {{"restart_id", maintenance.at("restart_id")}, {"instance_id", string_field(payload, "instance_id", 64)},
+                             {"boot_id_before", before}, {"boot_id_after", after}, {"cleanup_ok", true}, {"agent_ready", true}};
+            for (const auto& run_id : maintenance.at("run_ids")) {
+                const auto run = db.one("SELECT state,result FROM runs WHERE id=? AND board_id=?", {run_id, id});
+                if (run.is_null()) continue;
+                auto result = parsed(run.at("result"), Json::object());
+                result["restart_cleanup"] = evidence;
+                const auto state = run.at("state");
+                if (state == "queued" || state == "running" || state == "cancelling") {
+                    result["error"] = "Experiment interrupted by verified guest restart";
+                    result["cleanup_ok"] = true;
+                    db.execute("UPDATE runs SET state='cancelled',finished=?,result=? WHERE id=?", {now(), result.dump(), run_id});
+                } else db.execute("UPDATE runs SET result=? WHERE id=?", {result.dump(), run_id});
+            }
+            db.execute("UPDATE boards SET maintenance=NULL,quarantined=? WHERE id=?", {maintenance.at("previous_quarantined"), id});
+            return {{"board_id", id}, {"action", action}, {"restart_id", maintenance.at("restart_id")}, {"cleanup", evidence},
+                    {"quarantined", maintenance.at("previous_quarantined")}};
         } else invalid("Unknown board action");
         return {{"board_id", id}, {"action", action}};
     }

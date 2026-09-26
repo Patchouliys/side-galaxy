@@ -49,7 +49,7 @@ class Plan(Strict):
 class Enrollment(Strict):
     name: str = Field(min_length=1, max_length=64, pattern=r"^[\w .-]+$")
     board_profile: str = Field(default="generic", pattern=r"^[a-z0-9-]{1,64}$")
-    system_profile: str = Field(default="simulator", pattern=r"^[a-z0-9-]{1,64}$")
+    system_profile: str = Field(default="linux-process", pattern=r"^[a-z0-9-]{1,64}$")
 
 
 class ExecutionEnvironment(Strict):

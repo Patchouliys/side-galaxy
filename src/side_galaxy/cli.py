@@ -26,6 +26,10 @@ def main(argv=None):
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=7980)
     serve.add_argument("--db", default=".data/galaxy.db")
+    serve.add_argument('--lab-state-dir', action='append', help='Managed QEMU state directory; repeat for multiple labs')
+    workspace = sub.add_parser('workspace', help='Inspect or change demonstration mode')
+    workspace.add_argument('--demo', choices=['on', 'off'])
+    sub.add_parser('labs', help='List managed QEMU instances and restart operations')
     sub.add_parser("boards")
     sub.add_parser("profiles")
     sub.add_parser("batches")
@@ -47,6 +51,7 @@ def main(argv=None):
         p = sub.add_parser(name)
         p.add_argument("id")
         if name == "recover": p.add_argument("--cleanup-confirmed", action="store_true")
+        if name == 'reload': p.add_argument('--force', action='store_true', help='Interrupt current work before module validation')
     replay = sub.add_parser("replay", aliases=["migrate"])
     replay.add_argument("id", help="Source batch ID")
     replay.add_argument("--boards", nargs="+", required=True, help="Replacement target board IDs")
@@ -56,7 +61,7 @@ def main(argv=None):
     enroll = sub.add_parser("enroll")
     enroll.add_argument("--name", required=True)
     enroll.add_argument("--board-profile", default="generic")
-    enroll.add_argument("--system-profile", default="simulator")
+    enroll.add_argument("--system-profile", default="linux-process")
     enroll.add_argument("--output", required=True, help="Private new agent config file (0600)")
     agent = sub.add_parser("agent")
     agent.add_argument("--config", required=True)
@@ -105,7 +110,9 @@ def main(argv=None):
                 parser.error("--demo must bind to loopback")
             import uvicorn
             from .api import create_app
-            app = create_app(args.db, args.demo, os.environ.get("SG_TOKEN"), os.environ.get("SG_READ_TOKEN"))
+            app = create_app(args.db, args.demo, os.environ.get("SG_TOKEN"), os.environ.get("SG_READ_TOKEN"),
+                             local_access=args.host in ('127.0.0.1', '::1', 'localhost') and not os.environ.get('SG_TOKEN'),
+                             lab_dirs=args.lab_state_dir)
             uvicorn.run(app, host=args.host, port=args.port, access_log=False)
             return
         if args.command == "mcp":
@@ -144,7 +151,10 @@ def main(argv=None):
             return
         client = Client(args.server)
         try:
-            if args.command in ("boards", "profiles", "batches", "artifacts"):
+            if args.command == 'workspace':
+                output(client.request('PUT', '/api/workspace', {'demo': args.demo == 'on'}) if args.demo else client.request('GET', '/api/workspace'))
+            elif args.command == 'labs': output(client.request('GET', '/api/labs'))
+            elif args.command in ("boards", "profiles", "batches", "artifacts"):
                 output(client.request("GET", "/api/" + ("catalog" if args.command == "profiles" else args.command)))
             elif args.command in ("artifact-upload", "upload"):
                 from .workload_runner import MAX_BUNDLE, validate_bundle
@@ -165,6 +175,7 @@ def main(argv=None):
             elif args.command == "cancel": output(client.request("POST", "/api/batches/" + args.id + "/cancel"))
             elif args.command in ("reload", "recover"):
                 suffix = "?cleanup_confirmed=true" if getattr(args, "cleanup_confirmed", False) else ""
+                if args.command == 'reload' and args.force: suffix = '?force=true'
                 output(client.request("POST", f"/api/boards/{args.id}/{args.command}" + suffix))
             elif args.command == "enroll":
                 # Reserve private output before creating a board; never overwrite existing credentials.

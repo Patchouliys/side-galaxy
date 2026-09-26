@@ -1,3 +1,4 @@
+import argparse
 import hashlib
 import io
 import json
@@ -21,6 +22,90 @@ def state():
 
 
 class LabTests(unittest.TestCase):
+    def test_restart_confirms_new_boot_and_fresh_agent_after_tunnel_restoration(self):
+        for force in (False, True):
+            with self.subTest(force=force), tempfile.TemporaryDirectory() as directory:
+                lab = Lab(directory)
+                item = {**state(), 'board_id': 'board', 'server': 'http://127.0.0.1:7980'}
+                lab._write('state.json', item)
+                (lab.root / 'disk.qcow2').write_bytes(b'preserved disk')
+                before, after = str(uuid.uuid4()), str(uuid.uuid4())
+                boots, events = iter([before, before, after, after]), []
+                def remote(item, script, **kwargs):
+                    if script.startswith('cat /proc/'):
+                        return subprocess.CompletedProcess([], 0, next(boots), '')
+                    events.append(script.strip())
+                    return subprocess.CompletedProcess([], 255 if 'reboot' in script else 0, '', '')
+                def run(command, **kwargs):
+                    if 'exit' in command: events.append('close-tunnel')
+                    if '-R' in command:
+                        events.append('restore-tunnel')
+                        self.assertIn('127.0.0.1:17980:127.0.0.1:7980', command)
+                    return subprocess.CompletedProcess(command, 1 if 'check' in command else 0, '', '')
+                client = Mock()
+                client.request.side_effect = [[{'id': 'board', 'seen': seen, 'description': {'mode': 'linux-process'},
+                                               'reload_requested': 1, 'reload_ack': ack, 'reload_error': error}]
+                                              for seen, ack, error in ((999, 1, None), (1001, 0, None),
+                                                                       (1002, 1, 'validation failed'), (1003, 1, None))]
+                with patch.object(lab, '_running', return_value='running'), patch.object(lab, '_remote', side_effect=remote), patch.object(lab, '_run', side_effect=run), patch.object(lab, '_qmp', side_effect=lambda state, command: events.append(command)), patch.object(lab, '_install') as install, patch('side_galaxy.lab.Client', return_value=client), patch('side_galaxy.lab.time.time', return_value=1000), patch('side_galaxy.lab.time.sleep'):
+                    result = lab.restart(force=force, token='operator')
+                self.assertTrue(result['agent_ready'])
+                self.assertEqual((result['boot_id_before'], result['boot_id_after']), (before, after))
+                self.assertEqual(result['board_id'], item['board_id'])
+                self.assertEqual(result['instance_id'], item['instance_id'])
+                self.assertNotIn(directory, json.dumps(result))
+                self.assertEqual(lab._read()['stage'], 'ready')
+                self.assertEqual((lab.root / 'disk.qcow2').read_bytes(), b'preserved disk')
+                self.assertEqual(client.request.call_count, 4)
+                install.assert_not_called()
+                if force:
+                    self.assertEqual(events[0], 'system_reset')
+                    self.assertFalse(any('stop ' in event or 'reboot ' in event for event in events))
+                else:
+                    self.assertEqual(events[:2], ['systemctl stop side-galaxy-agent.service', 'systemctl reboot --no-block'])
+                    self.assertNotIn('system_reset', events)
+                self.assertLess(events.index('close-tunnel'), events.index('restore-tunnel'))
+                self.assertLess(events.index('restore-tunnel'), events.index('systemctl is-active --quiet side-galaxy-agent.service'))
+
+    def test_restart_wrong_identity_never_touches_ssh_or_resets_guest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            lab, item = Lab(directory), {**state(), 'board_id': 'board', 'server': 'http://127.0.0.1:7980'}
+            lab._write('state.json', item)
+            conn, seen = self.qmp_server(lab, str(uuid.uuid4()))
+            with patch('side_galaxy.lab.socket.socket', return_value=conn), patch.object(lab, '_run') as run, self.assertRaisesRegex(ValueError, 'identity'):
+                lab.restart(force=True)
+            run.assert_not_called()
+            self.assertEqual(seen, ['qmp_capabilities', 'query-uuid'])
+            self.assertEqual(lab._read()['stage'], 'restart-failed')
+
+    def test_restart_timeout_never_reports_ready_without_changed_boot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            lab, item = Lab(directory), {**state(), 'board_id': 'board', 'server': 'http://127.0.0.1:7980'}
+            lab._write('state.json', item)
+            clock = iter(range(1000))
+            with patch.object(lab, '_running', return_value='running'), patch.object(lab, '_boot_id', return_value=str(uuid.uuid4())), patch.object(lab, '_qmp') as qmp, patch.object(lab, '_run'), patch.object(lab, '_tunnel') as tunnel, patch('side_galaxy.lab.time.monotonic', side_effect=lambda: next(clock)), patch('side_galaxy.lab.time.sleep'), self.assertRaisesRegex(ValueError, 'timed out'):
+                lab.restart(force=True, timeout=30)
+            qmp.assert_called_once_with(unittest.mock.ANY, 'system_reset')
+            tunnel.assert_not_called()
+            self.assertEqual(lab._read()['stage'], 'restart-failed')
+
+    def test_cli_restart_uses_shared_async_api_instead_of_bypassing_maintenance(self):
+        from side_galaxy.lab_cli import add_parser, execute
+        parser = argparse.ArgumentParser()
+        add_parser(parser.add_subparsers(dest='command'))
+        args = parser.parse_args(['lab', 'restart', '--force'])
+        lab, client = Mock(), Mock()
+        lab.status.return_value = {'instance_id': 'managed-instance'}
+        lab._read.return_value = {'server': 'http://127.0.0.1:7980'}
+        client.request.return_value = {'operation_id': 'operation', 'state': 'running'}
+        with patch('side_galaxy.lab.Lab', return_value=lab), patch('side_galaxy.client.Client', return_value=client):
+            self.assertEqual(execute(args)['state'], 'running')
+            client.request.assert_called_once_with('POST', '/api/labs/managed-instance/restart', {'force': True})
+            lab.restart.assert_not_called()
+            client.request.side_effect = ValueError('HTTP 404: Not found')
+            with self.assertRaisesRegex(ValueError, 'Register this lab directory'):
+                execute(args)
+
     def test_qemu_argv_keeps_paths_structured_and_management_local(self):
         with tempfile.TemporaryDirectory() as directory:
             lab = Lab(Path(directory) / 'disk, space;$x')

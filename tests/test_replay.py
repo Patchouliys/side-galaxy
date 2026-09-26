@@ -17,6 +17,7 @@ class ReplayTests(unittest.TestCase):
             root = Path(directory)
             app = create_app(root / 'db', token='operator-token-at-least-24-chars', read_token='reader-token-at-least-24-chars', background=False)
             store = app.state.store
+            store.set_workspace_mode(True)
             description = Modules(root / 'modules', 'generic', 'simulator').current[1]
             boards = [store.enroll(Enrollment(name=name))['board_id'] for name in ('source', 'target')]
             for board in boards: store.heartbeat(board, Heartbeat(description=description))

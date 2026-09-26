@@ -149,14 +149,16 @@ class Agent:
                 self.execution = None
         elif self.staging:
             staged_snapshot, staged_job, future = self.staging
-            if future.done():
+            if not job or job["id"] != staged_job["id"] or job["state"] == "cancelling":
+                # A download owns no board processes; discard it without waiting to reload.
+                future.cancel()
+                self.staging = None
+                self.pending = (staged_job["id"], Completion(state="cancelled", result={"cleanup_ok": True, "code_executed": False}, module_sha256=staged_job["module_sha256"], cleanup_ok=True))
+            elif future.done():
                 self.staging = None
                 try:
                     artifact_path = future.result()
-                    if not job or job["id"] != staged_job["id"] or job["state"] == "cancelling":
-                        self.pending = (staged_job["id"], Completion(state="cancelled", result={"cleanup_ok": True, "code_executed": False}, module_sha256=staged_job["module_sha256"], cleanup_ok=True))
-                    else:
-                        self.execution = Execution(staged_snapshot, staged_job, artifact_path)
+                    self.execution = Execution(staged_snapshot, staged_job, artifact_path)
                 except Exception as exc:
                     self.pending = (staged_job["id"], Completion(state="failed", result={"error": "Artifact staging failed: " + type(exc).__name__, "code_executed": False}, module_sha256=staged_job["module_sha256"], cleanup_ok=True))
         elif job:

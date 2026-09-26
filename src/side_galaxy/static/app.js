@@ -1,14 +1,16 @@
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const selected = new Set();
-let token = '', boards = [], batches = [], artifacts = [], catalog = {boards:[],systems:[]};
+let token = '', boards = [], batches = [], artifacts = [], labs = [], workspace = null, catalog = {boards:[],systems:[]};
+const reloadRequests = new Set(), labRequests = new Set(), lifecycleErrors = new Map();
+let workspaceChanging = false, workspaceRevision = 0;
 let evidence = null, inspectedBoard = null, resultTab = 'logs';
 let refreshing = false, uploading = false, authPrompted = false, pendingIntent = null, checkedPlan = null;
-const labels = {ready:'就绪',busy:'占用',offline:'离线',quarantined:'隔离',queued:'排队中',running:'运行中',cancelling:'取消中',succeeded:'已完成',failed:'失败',cancelled:'已取消',lost:'失联'};
+const labels = {ready:'就绪',busy:'占用',maintenance:'维护中',reloading:'重载中',offline:'离线',quarantined:'隔离',queued:'排队中',running:'运行中',cancelling:'取消中',succeeded:'已完成',failed:'失败',cancelled:'已取消',lost:'失联'};
 const titles = {'cpu-contention':'CPU 竞争实验','memory-copy':'内存拷贝实验','kvm-affinity':'KVM 在线绑核',workload:'自定义实验'};
 const modeNames = {synthetic:'模拟', 'linux-process':'Linux 进程', kvm:'KVM guest'};
 const capabilityNames = {'cpu-affinity':'CPU 绑核','memory-limit':'进程内存限制',interference:'干扰负载','bandwidth-limit':'带宽控制'};
-const reasonNames = {'unknown board':'设备不存在','board offline':'设备离线','board quarantined; verify cleanup before recovery':'设备已隔离，请确认清理后恢复','board lease occupied':'设备正在执行其他任务','CPU unavailable':'CPU 不在设备可用集合内','management CPU reserved':'使用了管理保留核','template unsupported':'执行模块不支持此实验类型','CPU affinity unsupported':'不支持 CPU affinity','module requires a memory limit':'该模块要求设置内存预算','memory limit unsupported or exceeds available budget':'内存策略不受支持或超过设备预算','hardware bandwidth control unsupported':'不支持硬件带宽控制','module does not support interferers':'不支持内置干扰负载','artifact unavailable; upload again':'制品不可用，请重新上传','Operator token required':'需要操作者令牌','Authentication required':'请提供访问令牌'};
+const reasonNames = {'unknown board':'设备不存在','demo mode disabled; synthetic admission is blocked':'演示模式已关闭，不能提交到模拟设备','board restart maintenance is pending':'设备正在重启维护，等待恢复确认','module reload pending or failed; await a successful acknowledgement':'模块重载待确认或已失败，请等待成功确认后重试','board offline':'设备离线','board quarantined; verify cleanup before recovery':'设备已隔离，请确认清理后恢复','board lease occupied':'设备正在执行其他任务','CPU unavailable':'CPU 不在设备可用集合内','management CPU reserved':'使用了管理保留核','template unsupported':'执行模块不支持此实验类型','CPU affinity unsupported':'不支持 CPU affinity','module requires a memory limit':'该模块要求设置内存预算','memory limit unsupported or exceeds available budget':'内存策略不受支持或超过设备预算','hardware bandwidth control unsupported':'不支持硬件带宽控制','module does not support interferers':'不支持内置干扰负载','artifact unavailable; upload again':'制品不可用，请重新上传','Operator token required':'需要操作者令牌','Authentication required':'请提供访问令牌'};
 const active = state => ['queued','running','cancelling'].includes(state);
 const status = state => `<span class="status ${esc(state)}">${esc(labels[state] || state)}</span>`;
 const size = value => !Number.isFinite(value) ? '—' : value < 1024 ? `${value} B` : value < 1048576 ? `${(value/1024).toFixed(1)} KiB` : `${(value/1048576).toFixed(1)} MiB`;
@@ -64,6 +66,61 @@ async function api(path, method='GET', body, key) { return (await request(path,{
 async function download(path, filename) { saveBlob(await (await request(path)).blob(),filename); }
 async function copy(text) { try { await navigator.clipboard.writeText(text); toast('已复制'); } catch { toast('浏览器未允许复制，请选中文本复制。'); } }
 
+function applyWorkspace(value) {
+  if (!value.demo) {
+    const synthetic=new Set(boards.filter(board=>board.description?.mode==='synthetic').map(board=>board.id));
+    for (const id of synthetic) selected.delete(id);
+    if (evidence?.runs.length && evidence.runs.every(run=>synthetic.has(run.board_id)||run.result?.synthetic===true)) { $('result-dialog').close(); evidence=null; }
+  }
+  workspace=value; $('demo-toggle').checked=value.demo; $('demo-toggle').disabled=workspaceChanging;
+  $('mode').textContent=value.demo?'含演示设备':'真实工作区'; $('mode').classList.toggle('demo',value.demo);
+  $('mode').title=value.local_access?'仅本机访问':'令牌保护的工作区';
+  $('workspace-label').textContent=value.demo?'真实设备 + 演示设备':'真实设备与实验';
+}
+async function toggleDemo() {
+  if (!workspace || workspaceChanging) return;
+  const enabled=$('demo-toggle').checked;
+  if (!enabled && boards.some(board=>board.description?.mode==='synthetic'&&board.active_run) && !confirm('关闭演示设备将中断正在执行的模拟实验，并隐藏模拟设备与纯模拟记录。真实设备及实验不受影响。继续关闭？')) { $('demo-toggle').checked=workspace.demo; return; }
+  workspaceChanging=true; workspaceRevision++; $('demo-toggle').disabled=true; $('mode').textContent='切换中…';
+  try { applyWorkspace(await api('/workspace','PUT',{demo:enabled})); invalidateCheck(); }
+  catch (error) { applyWorkspace(workspace); toast(error.message); }
+  finally { workspaceChanging=false; $('demo-toggle').disabled=false; await refresh(); }
+}
+function reloadState(board) {
+  return board.reload_error || (board.reload_requested>board.reload_ack ? '重载待确认；新任务暂停受理':'版本已确认');
+}
+function reloadControls(board) {
+  const waiting=reloadRequests.has(board.id), blocked=waiting || board.status==='maintenance';
+  return `<div class="lifecycle-buttons"><button class="secondary" data-reload="${esc(board.id)}" ${blocked||board.reload_requested>board.reload_ack?'disabled':''}>${waiting?'请求中…':'空闲时重载'}</button><button class="secondary danger" data-reload="${esc(board.id)}" data-force="true" ${blocked?'disabled':''}>强制重载</button></div>`;
+}
+const labStages = {preparing:'准备镜像',booting:'启动系统',installing:'安装组件','starting-agent':'连接代理',ready:'代理已就绪',restarting:'正在重启','restarting-guest':'正在重启','restart-failed':'重启失败',stopped:'已停止'};
+function labControls(lab) {
+  const pending=labRequests.has(lab.instance_id) || lab.operation?.state==='running', error=lifecycleErrors.get('lab:'+lab.instance_id) || lab.operation?.error || (lab.operation?.state==='failed'?'重启失败，请检查实例与代理状态。':null);
+  const text=pending?'正在重启，等待新系统启动并恢复代理连接…':error?String(error):lab.operation?.state==='succeeded'?'重启完成，已确认系统重新启动与代理连接。':labStages[lab.stage] || lab.stage || lab.status;
+  return `<div class="lab-control"><div class="lab-state"><span class="tag ${pending?'pending':error?'failure':'success'}">${pending?'重启中':error?'操作失败':lab.status==='running'?'QEMU 运行中':esc(lab.status || '未知')}</span><code>${esc(lab.instance_id.slice(0,8))}</code></div><p class="lifecycle-note ${error?'error-text':''}" role="status">${esc(text)}</p><div class="lifecycle-buttons"><button class="secondary" data-lab-restart="${esc(lab.instance_id)}" ${pending||lab.status!=='running'?'disabled':''}>软重启 QEMU</button><button class="secondary danger" data-lab-restart="${esc(lab.instance_id)}" data-force="true" ${pending||lab.status!=='running'?'disabled':''}>强制复位</button></div></div>`;
+}
+function renderLabs() {
+  setMarkup('managed-labs',labs.length?labs.map(lab=>`<article><h3>${esc(boardName(lab.board_id))}</h3>${labControls(lab)}</article>`).join(''):'<p class="small muted">未发现受管 QEMU 实例。现有板卡的模块操作可在设备详情中查看。</p>');
+}
+function renderLifecycle() { renderModules(); renderLabs(); if ($('device-dialog').open) renderDevice(); }
+async function reloadBoard(id, force) {
+  const board=boards.find(item=>item.id===id); if (!board || reloadRequests.has(id)) return;
+  if (force && !confirm(`强制重载「${board.name}」的执行模块？当前实验将被中断，新任务需等待清理和模块版本确认。这不会重启设备操作系统。`)) return;
+  reloadRequests.add(id); lifecycleErrors.delete('board:'+id); renderLifecycle();
+  try { await api('/boards/'+encodeURIComponent(id)+'/reload'+(force?'?force=true':''),'POST'); toast(force?'强制重载已请求，等待实验中断、清理与模块确认':'重载已请求，将在空闲边界验证新版本'); }
+  catch (error) { lifecycleErrors.set('board:'+id,error.message); toast(error.message); }
+  finally { reloadRequests.delete(id); await refresh(); renderLifecycle(); }
+}
+async function restartLab(id, force) {
+  const lab=labs.find(item=>item.instance_id===id); if (!lab || labRequests.has(id) || lab.operation?.state==='running') return;
+  const name=boardName(lab.board_id);
+  if (!confirm(force?`强制复位「${name}」的 QEMU guest？正在运行的实验会中断，尚未落盘的数据可能丢失。虚拟磁盘会保留，系统重新启动及代理连接确认前无法提交新实验。`:`软重启「${name}」的 QEMU guest？当前实验将中断，平台会先停止代理并清理任务，再重启系统。虚拟磁盘会保留，代理重新连接前无法提交新实验。`)) return;
+  labRequests.add(id); lifecycleErrors.delete('lab:'+id); renderLifecycle();
+  try { const operation=await api('/labs/'+encodeURIComponent(id)+'/restart','POST',{force}); lab.operation={id:operation.operation_id,state:operation.state}; toast('重启请求已受理，设备详情将显示恢复进度。'); }
+  catch (error) { lifecycleErrors.set('lab:'+id,error.message); toast(error.message); }
+  finally { labRequests.delete(id); renderLifecycle(); await refresh(); }
+}
+
 function filteredBoards() {
   const query=$('search').value.trim().toLowerCase(), filter=$('board-filter').value, mode=$('system-filter').value;
   return boards.filter(board=>(filter==='all' || filter==='selected' && selected.has(board.id) || filter===board.status) && (mode==='all' || board.description?.mode===mode) && [board.id,board.name,board.board_profile,board.system_profile,board.description?.execution_environment?.architecture].join(' ').toLowerCase().includes(query));
@@ -97,9 +154,9 @@ function inspectBoard(id) { inspectedBoard=id; renderDevice(); $('device-dialog'
 function detailRows(values) { return `<dl class="detail-grid">${values.map(([label,value])=>`<dt>${esc(label)}</dt><dd>${value}</dd>`).join('')}</dl>`; }
 function renderDevice() {
   const board=boards.find(item=>item.id===inspectedBoard); if (!board) return;
-  const info=board.description, env=info?.execution_environment, profile=catalog.boards.find(item=>item.id===board.board_profile), current=batches.find(batch=>batch.runs.some(run=>run.id===board.active_run));
+  const info=board.description, env=info?.execution_environment, lab=labs.find(item=>item.board_id===board.id), profile=catalog.boards.find(item=>item.id===board.board_profile), current=batches.find(batch=>batch.runs.some(run=>run.id===board.active_run));
   $('device-title').textContent=board.name; $('device-subtitle').textContent=board.id;
-  setMarkup('device-content',`<div class="device-actions">${status(board.status)}<div class="actions"><button class="secondary" data-toggle-device="${esc(board.id)}" ${board.status!=='ready'&&!selected.has(board.id)?'disabled':''}>${selected.has(board.id)?'移出执行目标':'加入执行目标'}</button>${current?`<button class="primary" data-result="${esc(current.id)}">查看当前任务</button>`:''}</div></div>${detailRows([['板型',esc(profile?.name || board.board_profile)],['系统配置',esc(board.system_profile)],['执行方式',esc(modeName(info?.mode))],['最后心跳',esc(fullDate(board.seen))],['内存预算',memorySize(info?.memory_mib)],['内存要求',info?.memory_limit_required?'必须设置进程内存上限':'按模块能力选择']])}<h3 class="detail-heading">CPU 资源 <small>可用 ${freeCpus(board).length} / 共 ${info?.cpus.length || 0}</small></h3><div class="core-grid">${(info?.cpus || []).map(cpu=>`<span class="core ${info.reserved_cpus.includes(cpu)?'reserved':''}" title="${info.reserved_cpus.includes(cpu)?'管理保留核':'可用于实验'}">${cpu}</span>`).join('') || '<span class="muted small">等待能力探测</span>'}</div><p class="hint">灰色为管理保留核；内存数值是模块上报的可配置预算。</p><h3 class="detail-heading">执行环境</h3>${env?detailRows([['操作系统',esc(env.os || '未知')],['CPU 架构',esc(env.architecture || '未知')],['命令探测',env.commands_complete?'完整清单':'部分清单']]):'<p class="small muted">代理尚未上报执行环境。</p>'}${env?.commands?.length?`<details data-detail="commands"><summary>可用命令 (${env.commands.length})</summary><div class="tag-list">${env.commands.map(command=>`<code class="tag">${esc(command)}</code>`).join('')}</div></details>`:''}<h3 class="detail-heading">能力与实验类型</h3><div class="tag-list">${(info?.capabilities || []).map(cap=>`<span class="tag" title="${esc(cap)}">${esc(capabilityNames[cap] || cap)}</span>`).join('')}</div><div class="tag-list">${(info?.templates || []).map(template=>`<span class="tag">${esc(titles[template] || template)}</span>`).join('')}</div><h3 class="detail-heading">执行模块</h3>${detailRows([['名称',esc(info?.name || '未连接')],['版本摘要',`<code class="break-all">${esc(info?.module_sha256 || '—')}</code>`],['清理范围',esc(info?.cleanup_scope || '未上报')],['重载状态',board.reload_error?`<span class="error-text">${esc(board.reload_error)}</span>`:board.reload_requested>board.reload_ack?'等待空闲边界处理':'请求已处理']])}<div class="dialog-actions"><button class="secondary" data-reload="${esc(board.id)}">请求模块重载</button>${board.status==='quarantined'?`<button class="secondary" data-recover="${esc(board.id)}">确认清理后恢复</button>`:''}</div>`);
+  setMarkup('device-content',`<div class="device-actions">${status(board.status)}<div class="actions"><button class="secondary" data-toggle-device="${esc(board.id)}" ${board.status!=='ready'&&!selected.has(board.id)?'disabled':''}>${selected.has(board.id)?'移出执行目标':'加入执行目标'}</button>${current?`<button class="primary" data-result="${esc(current.id)}">查看当前任务</button>`:''}</div></div>${detailRows([['板型',esc(profile?.name || board.board_profile)],['系统配置',esc(board.system_profile)],['执行方式',esc(modeName(info?.mode))],['最后心跳',esc(fullDate(board.seen))],['内存预算',memorySize(info?.memory_mib)],['内存要求',info?.memory_limit_required?'必须设置进程内存上限':'按模块能力选择']])}<h3 class="detail-heading">CPU 资源 <small>可用 ${freeCpus(board).length} / 共 ${info?.cpus.length || 0}</small></h3><div class="core-grid">${(info?.cpus || []).map(cpu=>`<span class="core ${info.reserved_cpus.includes(cpu)?'reserved':''}" title="${info.reserved_cpus.includes(cpu)?'管理保留核':'可用于实验'}">${cpu}</span>`).join('') || '<span class="muted small">等待能力探测</span>'}</div><p class="hint">灰色为管理保留核；内存数值是模块上报的可配置预算。</p><h3 class="detail-heading">执行环境</h3>${env?detailRows([['操作系统',esc(env.os || '未知')],['CPU 架构',esc(env.architecture || '未知')],['命令探测',env.commands_complete?'完整清单':'部分清单']]):'<p class="small muted">代理尚未上报执行环境。</p>'}${env?.commands?.length?`<details data-detail="commands"><summary>可用命令 (${env.commands.length})</summary><div class="tag-list">${env.commands.map(command=>`<code class="tag">${esc(command)}</code>`).join('')}</div></details>`:''}<h3 class="detail-heading">能力与实验类型</h3><div class="tag-list">${(info?.capabilities || []).map(cap=>`<span class="tag" title="${esc(cap)}">${esc(capabilityNames[cap] || cap)}</span>`).join('')}</div><div class="tag-list">${(info?.templates || []).map(template=>`<span class="tag">${esc(titles[template] || template)}</span>`).join('')}</div><h3 class="detail-heading">执行模块</h3>${detailRows([['名称',esc(info?.name || '未连接')],['版本摘要',`<code class="break-all">${esc(info?.module_sha256 || '—')}</code>`],['清理范围',esc(info?.cleanup_scope || '未上报')],['重载状态',`<span class="${board.reload_error?'error-text':''}">${esc(reloadState(board))}</span>`]])}${reloadControls(board)}${lifecycleErrors.has('board:'+board.id)?`<p class="lifecycle-note error-text" role="status">${esc(lifecycleErrors.get('board:'+board.id))}</p>`:''}${board.status==='quarantined'?`<div class="dialog-actions"><button class="secondary" data-recover="${esc(board.id)}">确认清理后恢复</button></div>`:''}${lab?`<h3 class="detail-heading">受管 QEMU 实例</h3>${labControls(lab)}`:''}`);
 }
 
 function batchRows(items) {
@@ -118,24 +175,26 @@ function renderHistory() {
   $('history-count').textContent=`${items.length} 个批次`; setMarkup('all-runs',batchRows(items)); setMarkup('recent-runs',batchRows(batches.slice(0,3)));
 }
 function renderModules() {
-  setMarkup('module-list',boards.map(board=>`<article class="module-item panel"><div><button class="device-link" data-device="${esc(board.id)}">${esc(board.name)}</button><p>${esc(board.system_profile)} · ${esc(board.description?.name || '等待探测')}</p><code>${esc(board.description?.module_sha256 || '未连接')}</code><div class="tag-list">${(board.description?.capabilities || []).map(cap=>`<span class="tag">${esc(capabilityNames[cap] || cap)}</span>`).join('')}</div><p class="${board.reload_error?'error-text':''}">${board.reload_error?esc(board.reload_error):board.reload_requested>board.reload_ack?'等待当前任务结束后重载':'模块就绪'}</p></div>${status(board.status)}<button class="secondary" data-reload="${esc(board.id)}">请求重载</button></article>`).join('') || '<p class="empty">接入设备后查看其模块。</p>');
+  setMarkup('module-list',boards.map(board=>`<article class="module-item panel"><div><button class="device-link" data-device="${esc(board.id)}">${esc(board.name)}</button><p>${esc(board.system_profile)} · ${esc(board.description?.name || '等待探测')}</p><code>${esc(board.description?.module_sha256 || '未连接')}</code><div class="tag-list">${(board.description?.capabilities || []).map(cap=>`<span class="tag">${esc(capabilityNames[cap] || cap)}</span>`).join('')}</div><p class="${board.reload_error?'error-text':''}">${esc(reloadState(board))}</p>${lifecycleErrors.has('board:'+board.id)?`<p class="error-text">${esc(lifecycleErrors.get('board:'+board.id))}</p>`:''}</div>${status(board.status)}${reloadControls(board)}</article>`).join('') || '<p class="empty">接入设备后查看其模块。</p>');
 }
 async function refresh() {
-  if (refreshing) return; refreshing=true;
+  if (refreshing || workspaceChanging) return; refreshing=true; const revision=workspaceRevision;
   try {
-    [boards,batches]=await Promise.all([api('/boards'),api('/batches')]);
+    const [mode,nextBoards,nextBatches,nextLabs]=await Promise.all([api('/workspace'),api('/boards'),api('/batches'),api('/labs')]);
+    if (workspaceChanging || revision!==workspaceRevision) return;
+    applyWorkspace(mode); boards=nextBoards; batches=nextBatches; labs=nextLabs.filter(lab=>lab.instance_id); renderLabs();
     // Keep unavailable selected targets visible so preflight can explain their state.
     renderBoards(); renderModules(); renderHistory();
     const ready=boards.filter(board=>board.status==='ready');
     $('metric-online').textContent=ready.length; $('metric-total').textContent=`共 ${boards.length} 台设备`;
     $('metric-cores').textContent=ready.reduce((count,board)=>count+freeCpus(board).length,0);
     $('metric-active').textContent=boards.filter(board=>board.active_run).length;
-    $('metric-attention').textContent=boards.filter(board=>['offline','quarantined'].includes(board.status)).length;
+    $('metric-attention').textContent=boards.filter(board=>['offline','quarantined','maintenance','reloading'].includes(board.status)).length;
     $('nav-count').textContent=batches.length; $('connection').textContent='控制面在线'; $('connection-error').hidden=true;
     $('last-refresh').textContent='更新于 '+new Date().toLocaleTimeString('zh-CN',{hour12:false})+' · 每 2 秒';
     const templates=[...new Set(boards.flatMap(board=>board.description?.templates || []))].filter(name=>name!=='workload');
     for (const name of templates) if (![...$('template').options].some(option=>option.value===name)) $('template').add(new Option(titles[name] || name,name));
-    if ($('device-dialog').open) renderDevice();
+    if ($('device-dialog').open) { if (boards.some(board=>board.id===inspectedBoard)) renderDevice(); else { $('device-dialog').close(); inspectedBoard=null; } }
     if ($('result-dialog').open && evidence?.runs.some(run=>active(run.state))) { evidence=await api('/batches/'+encodeURIComponent(evidence.id)); renderResult(); }
   } catch (error) { $('connection').textContent='连接待恢复'; $('connection-error').textContent=error.message; $('connection-error').hidden=false; }
   finally { refreshing=false; }
@@ -311,11 +370,13 @@ document.addEventListener('click',async event=>{
     if (button.dataset.downloadArtifact) await download('/artifacts/'+button.dataset.downloadArtifact+'/download','experiment-'+button.dataset.downloadArtifact.slice(0,12)+'.zip');
     if (button.dataset.outputRun) await download('/runs/'+encodeURIComponent(button.dataset.outputRun)+'/outputs/'+button.dataset.outputIndex,button.dataset.outputName.split('/').pop());
     if (button.dataset.cancel) { await api('/batches/'+encodeURIComponent(button.dataset.cancel)+'/cancel','POST'); toast('取消已请求，等待代理确认清理'); await refresh(); }
-    if (button.dataset.reload) { await api('/boards/'+encodeURIComponent(button.dataset.reload)+'/reload','POST'); toast('重载已请求，将在空闲边界验证新版本'); await refresh(); }
+    if (button.dataset.reload) await reloadBoard(button.dataset.reload,button.dataset.force==='true');
+    if (button.dataset.labRestart) await restartLab(button.dataset.labRestart,button.dataset.force==='true');
     if (button.dataset.recover && confirm('仅在确认该设备上的实验负载已停止、资源配置已恢复后继续。确认恢复设备？')) { await api('/boards/'+encodeURIComponent(button.dataset.recover)+'/recover?cleanup_confirmed=true','POST'); toast('已恢复设备'); await refresh(); }
   } catch (error) { toast(error.message); }
 });
 document.addEventListener('change',event=>{if (event.target.dataset.board) { changeSelection(event.target.dataset.board,event.target.checked); event.target.checked=selected.has(event.target.dataset.board); }});
+$('demo-toggle').onchange=toggleDemo;
 $('select-all').onclick=()=>{const ready=filteredBoards().filter(board=>board.status==='ready'), all=ready.length&&ready.every(board=>selected.has(board.id)); if(all) ready.forEach(board=>selected.delete(board.id)); else for (const board of ready) { if(selected.size>=32) break; selected.add(board.id); } invalidateCheck(); renderBoards();};
 for (const id of ['clear-selection','clear-targets']) $(id).onclick=()=>{selected.clear();invalidateCheck();renderBoards();};
 for (const id of ['search','board-filter','system-filter']) $(id).addEventListener('input',renderBoards);
@@ -347,6 +408,6 @@ document.addEventListener('keydown',event=>{
   if (event.key==='/'&&!event.ctrlKey&&!event.metaKey&&!['INPUT','TEXTAREA','SELECT'].includes(event.target.tagName)&&!document.querySelector('dialog[open]')) { event.preventDefault();switchView('overview');$('search').focus(); }
   if (event.target.dataset.resultTab && ['ArrowLeft','ArrowRight'].includes(event.key)) { event.preventDefault();const tabs=[...document.querySelectorAll('[data-result-tab]')],index=tabs.indexOf(event.target),next=tabs[(index+(event.key==='ArrowRight'?1:tabs.length-1))%tabs.length];switchResultTab(next.dataset.resultTab);next.focus(); }
 });
-fetch('/healthz').then(response=>response.json()).then(health=>{$('mode').textContent=health.demo?'本地工作区':'控制面';$('evidence-note').textContent='模拟设备只验证分发；Linux / KVM 目标执行实际代码。';}).catch(()=>$('mode').textContent='OFFLINE');
+$('evidence-note').textContent='模拟设备只验证分发；Linux / KVM 目标执行实际代码。';
 updateSource();switchView(location.hash.slice(1)||'overview');loadCatalog();loadArtifacts();refresh();setInterval(()=>{if(!document.hidden)refresh();},2000);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)refresh();});

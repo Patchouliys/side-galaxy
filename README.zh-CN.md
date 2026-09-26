@@ -35,17 +35,16 @@ C++20 核心通过 SQLite 管理板卡注册、能力准入、原子批次、租
 
 ```sh
 uv sync --frozen
-uv run sg serve --demo
+uv run sg serve
 ```
 
-打开 [localhost:7980](http://127.0.0.1:7980)，进入控制台。模拟板卡生成 synthetic 数据，不执行上传的代码。
+打开 [localhost:7980](http://127.0.0.1:7980) 进入控制台。默认工作区只显示真实接入的设备；使用 `sg lab up` 接入本地 Linux，或开启控制台的「演示模式」查看模拟示例。本地访问仅限 loopback，远程监听需要 `SG_TOKEN`。
 
 在另一个终端中运行：
 
 ```sh
 uv run sg boards
-uv run sg preflight examples/pi-contention.json
-uv run sg submit examples/pi-contention.json --key first-experiment
+uv run sg lab up
 uv run sg batches
 ```
 
@@ -54,6 +53,12 @@ uv run sg batches
 启动控制服务后，在另一个终端运行 `uv run sg lab up`。本地 QEMU 环境会启动 ARM64 Linux，在 guest 内构建原生核心并注册设备，真正编译、运行上传的实验。依赖和配置见[本地实验指南](docs/local-lab.md)。
 
 选择其他目标即可复用原实验包和参数，也可运行 `sg replay SOURCE_BATCH_ID --boards TARGET_BOARD_ID --key deployment-001`。准入前会检查声明的架构、操作系统和命令要求。
+
+## 实验控制
+
+`sg reload BOARD_ID` 在当前实验结束后重载；`sg reload BOARD_ID --force` 会先中断实验再重载。控制台提供对应操作与进度、错误反馈。受管 QEMU 支持 `sg lab restart` 和 `sg lab restart --force`，通过 `sg labs` 查看完成状态；重启保留磁盘与设备身份。
+
+演示开关会启动或停止示例代理，隐藏模拟设备及纯模拟历史，不删除记录。CLI 使用 `sg workspace --demo on|off`；`sg serve --demo` 可明确指定以演示模式启动。
 
 ## 使用自己的实验
 

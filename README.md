@@ -35,17 +35,16 @@ Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/). Building from source
 
 ```sh
 uv sync --frozen
-uv run sg serve --demo
+uv run sg serve
 ```
 
-Open [localhost:7980](http://127.0.0.1:7980) and enter the console. Demo boards generate synthetic results and do not execute uploaded code.
+Open [localhost:7980](http://127.0.0.1:7980) and enter the console. The default workspace shows real connected targets. Use `sg lab up` for local Linux execution, or enable **Demo mode** in the console to explore synthetic samples. Local access stays loopback-only; remote listeners require `SG_TOKEN`.
 
 In another terminal:
 
 ```sh
 uv run sg boards
-uv run sg preflight examples/pi-contention.json
-uv run sg submit examples/pi-contention.json --key first-experiment
+uv run sg lab up
 uv run sg batches
 ```
 
@@ -54,6 +53,12 @@ uv run sg batches
 Start the control server, then run `uv run sg lab up` in another terminal. The local QEMU lab boots ARM64 Linux, builds the native core inside the guest, and registers a target that actually compiles and runs uploaded experiments. See the [local lab guide](docs/local-lab.md) for prerequisites and options.
 
 Select another target to reuse the same artifact and parameters, or run `sg replay SOURCE_BATCH_ID --boards TARGET_BOARD_ID --key deployment-001`. Declared architecture, OS, and command requirements are checked before admission.
+
+## Experiment controls
+
+Use `sg reload BOARD_ID` to reload after current work, or `sg reload BOARD_ID --force` to interrupt it first. The console exposes both actions with progress and failure feedback. Managed QEMU guests also support `sg lab restart` and `sg lab restart --force`; watch completion with `sg labs`. Restart preserves the disk and device identity.
+
+The demo switch starts/stops sample agents and hides synthetic-only inventory/history without deleting records. It is also available as `sg workspace --demo on|off`; `sg serve --demo` explicitly starts with samples enabled.
 
 ## Bring your experiment
 

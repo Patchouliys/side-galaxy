@@ -31,7 +31,10 @@ async def protocol():
                 assert ('run_experiment' in names) == writes
                 assert ('upload_artifact' in names) == writes
                 assert ('replay_experiment' in names) == writes
-                assert {'list_artifacts', 'get_output'} <= names
+                assert {'list_artifacts', 'get_output', 'get_workspace', 'list_labs'} <= names
+                assert all((name in names) == writes for name in ('force_reload_module','restart_lab','set_demo_mode'))
+                assert not (await session.call_tool('get_workspace')).isError
+                assert not (await session.call_tool('list_labs')).isError
                 assert not (await session.call_tool('list_boards')).isError
                 if writes:
                     with tempfile.TemporaryDirectory() as root:

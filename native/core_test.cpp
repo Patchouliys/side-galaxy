@@ -231,6 +231,74 @@ int main() {
                 "Incomplete inventory presented as a complete command list");
         portable["artifact_requirements"] = Json::object();
         require(compatibility.good("preflight", portable).at("valid").get<bool>(), "Legacy bundle acquired environment requirements");
+
+        Fixture lifecycle;
+        enroll(lifecycle);
+        require(lifecycle.good("workspace_mode").at("demo").get<bool>(), "Legacy Store demo default changed");
+        auto demo_batch = lifecycle.good("submit", submission("demo-off"));
+        auto demo_run = lifecycle.good("poll", {{"board_id", "alpha"}});
+        lifecycle.good("set_workspace_mode", {{"enabled", false}});
+        require(!lifecycle.good("workspace_mode").at("demo").get<bool>(), "Demo setting not saved");
+        require(lifecycle.good("poll", {{"board_id", "alpha"}}).at("state") == "cancelling", "Disabled demo lost cancellation acknowledgement path");
+        require(lifecycle.good("poll", {{"board_id", "beta"}}).is_null(), "Disabled demo claimed queued work");
+        require(!lifecycle.good("preflight", submission("demo-blocked")).at("valid").get<bool>(), "Hidden synthetic ID bypassed demo admission");
+        lifecycle.good("finish", {{"board_id", "alpha"}, {"run_id", demo_run.at("id")}, {"completion", completion()}});
+        require(lifecycle.good("batch", {{"batch_id", demo_batch.at("id")}}).at("runs")[1].at("state") == "cancelled", "Queued synthetic work survived demo disable");
+        lifecycle.good("set_workspace_mode", {{"enabled", true}});
+        lifecycle.good("board_action", {{"board_id", "alpha"}, {"action", "reload"}});
+        auto single = submission("reload-blocked", plan({"alpha"}));
+        require(!lifecycle.good("preflight", single).at("valid").get<bool>(), "Reload request failed to gate admission");
+        lifecycle.good("heartbeat", {{"board_id", "alpha"}, {"heartbeat", {{"description", description()}, {"reload_ack", 1}, {"reload_error", "invalid module"}}}});
+        require(!lifecycle.good("preflight", single).at("valid").get<bool>(), "Failed reload acknowledgement released admission");
+        lifecycle.good("heartbeat", {{"board_id", "alpha"}, {"heartbeat", {{"description", description('d')}, {"reload_ack", 1}, {"reload_error", nullptr}}}});
+        require(lifecycle.good("preflight", single).at("valid").get<bool>(), "Successful reload stayed blocked");
+        auto force_batch = lifecycle.good("submit", single);
+        auto force_run = lifecycle.good("poll", {{"board_id", "alpha"}});
+        lifecycle.good("board_action", {{"board_id", "alpha"}, {"action", "force-reload"}});
+        require(lifecycle.good("poll", {{"board_id", "alpha"}}).at("state") == "cancelling", "Forced reload did not cancel current execution");
+        lifecycle.good("finish", {{"board_id", "alpha"}, {"run_id", force_run.at("id")}, {"completion", completion(false, 'd')}});
+        lifecycle.good("heartbeat", {{"board_id", "alpha"}, {"heartbeat", {{"description", description()}, {"reload_ack", 2}}}});
+        require(lifecycle.good("boards")[0].at("quarantined") == 1, "Reload acknowledgement cleared uncertain cleanup");
+
+        Fixture restart;
+        enroll(restart);
+        auto real = description();
+        real["mode"] = "linux-process";
+        restart.good("heartbeat", {{"board_id", "alpha"}, {"heartbeat", {{"description", real}}}});
+        restart.good("submit", submission("before-restart", plan({"alpha"})));
+        auto old_run = restart.good("poll", {{"board_id", "alpha"}});
+        auto begin = restart.good("board_action", {{"board_id", "alpha"}, {"action", "restart"}, {"restart_id", "restart-1"}});
+        require(restart.good("board_action", {{"board_id", "alpha"}, {"action", "restart"}, {"restart_id", "retry"}}).at("restart_id") == begin.at("restart_id"), "Restart retry replaced maintenance identity");
+        require(restart.good("poll", {{"board_id", "alpha"}}).at("state") == "cancelling", "Maintenance hid active cancellation");
+        restart.bad("board_action", {{"board_id", "alpha"}, {"action", "recover"}}, "conflict");
+        Json reboot = {{"board_id", "alpha"}, {"action", "restart-complete"}, {"restart_id", "restart-1"},
+                       {"instance_id", "lab-instance"}, {"boot_id_before", "old-boot"}, {"boot_id_after", "new-boot"}, {"agent_ready", true}};
+        auto invalid_reboot = reboot;
+        invalid_reboot["restart_id"] = "stale";
+        restart.bad("board_action", invalid_reboot, "conflict");
+        invalid_reboot = reboot;
+        invalid_reboot["boot_id_after"] = "old-boot";
+        restart.bad("board_action", invalid_reboot, "conflict");
+        restart.good("board_action", reboot);
+        auto interrupted = restart.good("batch", {{"batch_id", old_run.at("batch_id")}}).at("runs")[0];
+        require(interrupted.at("state") == "cancelled" && interrupted.at("result").at("restart_cleanup").at("cleanup_ok").get<bool>(), "Reboot did not retain interrupted execution evidence");
+        require(restart.good("boards")[0].at("status") == "ready", "Verified reboot did not release its own maintenance gate");
+        restart.sql("UPDATE boards SET quarantined=1 WHERE id='alpha'");
+        restart.good("board_action", {{"board_id", "alpha"}, {"action", "restart"}, {"restart_id", "restart-2"}});
+        reboot["restart_id"] = "restart-2";
+        restart.good("board_action", reboot);
+        require(restart.good("boards")[0].at("quarantined") == 1, "Reboot cleared unrelated preexisting quarantine");
+
+        Fixture legacy;
+        legacy.sql("CREATE TABLE boards (id TEXT PRIMARY KEY,name TEXT NOT NULL,board_profile TEXT NOT NULL,"
+                   "system_profile TEXT NOT NULL,token_hash TEXT NOT NULL,description TEXT,seen REAL NOT NULL DEFAULT 0,"
+                   "quarantined INTEGER NOT NULL DEFAULT 0,reload_requested INTEGER NOT NULL DEFAULT 0,"
+                   "reload_ack INTEGER NOT NULL DEFAULT 0,reload_error TEXT,local INTEGER NOT NULL DEFAULT 0);"
+                   "INSERT INTO boards(id,name,board_profile,system_profile,token_hash) VALUES('legacy','preserved','generic','linux-process','legacy-token');");
+        legacy.good("init");
+        legacy.good("init");
+        const auto migrated = legacy.good("boards");
+        require(migrated.size() == 1 && migrated[0].at("name") == "preserved" && migrated[0].at("maintenance").is_null(), "Additive schema migration lost an old board");
         std::cout << "Native SQLite transaction, concurrency, lifecycle and ABI checks passed\n";
         return 0;
     } catch (const std::exception& error) {

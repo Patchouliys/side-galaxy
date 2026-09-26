@@ -2,6 +2,7 @@ import asyncio
 from contextlib import asynccontextmanager
 import hmac
 import os
+import uuid
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
@@ -13,38 +14,54 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import Field
 from .models import Completion, Enrollment, Heartbeat, Plan, Strict
 from .profiles import catalog
-from .runtime import Agent, LocalClient, Modules
 from .store import Conflict, Store
+from .workspace import Workspace
 
 class ReplayRequest(Strict):
     boards: list[str] = Field(min_length=1, max_length=32)
 
 
+class WorkspaceRequest(Strict):
+    demo: bool
+
+
+class RestartRequest(Strict):
+    force: bool = False
+
+
 STATIC = Path(__file__).with_name("static")
 
 
-def create_app(db_path=".data/galaxy.db", demo=False, token=None, read_token=None, background=True):
-    if not demo and (not token or len(token) < 24):
-        raise ValueError("Set SG_TOKEN (at least 24 characters) or explicitly use --demo")
+def create_app(db_path=".data/galaxy.db", demo=False, token=None, read_token=None, background=True,
+               local_access=False, lab_dirs=None):
+    if token is not None and len(token) < 24:
+        raise ValueError("SG_TOKEN must contain at least 24 characters")
+    if not demo and not local_access and not token:
+        raise ValueError("Set SG_TOKEN (at least 24 characters) or use a local loopback workspace")
+    loopback_only = local_access or demo
+    anonymous_local = loopback_only and token is None
     store = Store(db_path)
-    agents = []
-    if demo:
-        existing = {b["id"] for b in store.boards()}
-        for board_id, name, board in [("pi4-lab", "PI 4 · ORION", "pi4"), ("pi5-lab", "PI 5 · LYRA", "pi5"), ("pi5-edge", "PI 5 · CYGNUS", "pi5")]:
-            if board_id not in existing:
-                store.enroll(Enrollment(name=name.replace("·", "-"), board_profile=board), local=True, board_id=board_id)
-            agent = Agent(LocalClient(store), board_id, Modules(Path(db_path).parent / "modules" / board_id, board, "simulator"))
-            agents.append(agent)
-            agent.tick()
+    workspace = Workspace(store, demo)
+    managed_dirs = [Path(p).resolve() for p in (lab_dirs if lab_dirs is not None else [Path(db_path).parent / 'lab'])]
+    restart_tasks, restart_operations = {}, {}
+    restart_lock = asyncio.Lock()
+
+    def managed_labs():
+        from .lab import Lab
+        entries = []
+        for path in managed_dirs:
+            if not (path / 'state.json').is_file(): continue
+            lab = Lab(path)
+            state = lab.status()
+            if state.get('instance_id'):
+                entries.append((lab, {**state, 'operation': restart_operations.get(state['instance_id'])}))
+        return entries
 
     @asynccontextmanager
     async def lifespan(app):
         async def worker():
             while True:
-                for agent in agents:
-                    try: await asyncio.to_thread(agent.tick)
-                    except Exception: pass  # Heartbeat expiry quarantines failed local workers.
-                await asyncio.to_thread(store.boards)
+                await asyncio.to_thread(workspace.tick)
                 await asyncio.sleep(.5)
         task = asyncio.create_task(worker()) if background else None
         yield
@@ -52,16 +69,19 @@ def create_app(db_path=".data/galaxy.db", demo=False, token=None, read_token=Non
             task.cancel()
             try: await task
             except asyncio.CancelledError: pass
-        for agent in agents: await asyncio.to_thread(agent.shutdown)
+        if restart_tasks: await asyncio.gather(*restart_tasks.values(), return_exceptions=True)
+        await asyncio.to_thread(workspace.shutdown)
 
     app = FastAPI(title="Side Galaxy", version="0.1.0", lifespan=lifespan)
     app.state.store = store
+    app.state.workspace = workspace
 
     @app.middleware("http")
     async def boundaries(request: Request, call_next):
         host = request.url.hostname
-        if demo and host not in ("localhost", "127.0.0.1", "::1", "testserver"):
-            return JSONResponse({"detail": "Demo is loopback only"}, status_code=403)
+        if loopback_only and (host not in ("localhost", "127.0.0.1", "::1", "testserver")
+                              or (request.client and request.client.host not in ("127.0.0.1", "::1", "testclient"))):
+            return JSONResponse({"detail": "Local workspace is loopback only"}, status_code=403)
         origin = request.headers.get("origin")
         if origin and origin != str(request.base_url).rstrip("/"):
             return JSONResponse({"detail": "Cross-origin access denied"}, status_code=403)
@@ -86,12 +106,12 @@ def create_app(db_path=".data/galaxy.db", demo=False, token=None, read_token=Non
 
     def reader(authorization: str | None = Header(default=None)):
         supplied = bearer(authorization)
-        if demo and token is None: return
+        if anonymous_local: return
         if not any(expected and hmac.compare_digest(supplied, expected) for expected in (token, read_token)):
             raise HTTPException(401, "Authentication required")
 
     def writer(authorization: str | None = Header(default=None)):
-        if demo and token is None: return
+        if anonymous_local: return
         if not token or not hmac.compare_digest(bearer(authorization), token):
             raise HTTPException(403, "Operator token required")
 
@@ -128,19 +148,60 @@ def create_app(db_path=".data/galaxy.db", demo=False, token=None, read_token=Non
         return Response(content, media_type="application/octet-stream", headers={"Content-Disposition": "attachment; filename*=UTF-8''" + quote(name, safe=""), "X-Content-SHA256": item["sha256"]})
 
     @app.get("/healthz")
-    def health(): return {"status": "ok", "demo": demo, "version": "0.1.0"}
+    def health(): return {"status": "ok", **store.workspace_mode(), "version": "0.1.0"}
+
+    @app.get("/api/workspace", dependencies=[Depends(reader)])
+    def workspace_status(): return {**store.workspace_mode(), 'local_access': anonymous_local}
+
+    @app.put("/api/workspace", dependencies=[Depends(writer)])
+    async def workspace_mode(data: WorkspaceRequest):
+        try: mode = await asyncio.to_thread(workspace.set_demo, data.demo)
+        except ValueError as exc: raise HTTPException(409, str(exc)) from None
+        return {**mode, 'local_access': anonymous_local}
+
+    @app.get('/api/labs', dependencies=[Depends(reader)])
+    def labs(): return [status for _, status in managed_labs()]
+
+    @app.post('/api/labs/{instance_id}/restart', dependencies=[Depends(writer)], status_code=202)
+    async def restart_lab(instance_id: str, data: RestartRequest):
+        async with restart_lock:
+            if instance_id in restart_tasks and not restart_tasks[instance_id].done():
+                raise HTTPException(409, 'Lab restart already in progress')
+            selected = next(((lab, status) for lab, status in await asyncio.to_thread(managed_labs)
+                             if status['instance_id'] == instance_id), None)
+            if not selected: raise HTTPException(404, 'Managed lab not found; configure --lab-state-dir on the server')
+            lab, status = selected
+            if status['status'] != 'running' or not status.get('board_id'):
+                raise HTTPException(409, 'Lab must be running with an enrolled board')
+            gate = await asyncio.to_thread(store.board_action, status['board_id'], 'restart')
+            operation = {'id': str(uuid.uuid4()), 'state': 'running'}
+            restart_operations[instance_id] = operation
+
+            async def perform():
+                try:
+                    evidence = await asyncio.to_thread(lab.restart, force=data.force, token=token)
+                    await asyncio.to_thread(store.board_action, status['board_id'], 'restart-complete',
+                                            restart_id=gate['restart_id'], instance_id=instance_id,
+                                            boot_id_before=evidence['boot_id_before'], boot_id_after=evidence['boot_id_after'],
+                                            agent_ready=evidence['agent_ready'])
+                    operation['state'] = 'succeeded'
+                except Exception as exc:
+                    operation.update(state='failed', error='Restart failed; device remains protected: ' + type(exc).__name__)
+            restart_tasks[instance_id] = asyncio.create_task(perform())
+            return {'operation_id': operation['id'], 'state': operation['state']}
 
     @app.get("/api/catalog", dependencies=[Depends(reader)])
     def get_catalog(): return catalog(os.environ.get("SG_PROFILES_DIR"))
 
     @app.get("/api/boards", dependencies=[Depends(reader)])
-    def boards(): return store.boards()
+    def boards(): return workspace.boards()
 
     @app.post("/api/boards", dependencies=[Depends(writer)], status_code=201)
     def enroll(data: Enrollment): return store.enroll(data)
 
     @app.post("/api/boards/{board_id}/reload", dependencies=[Depends(writer)])
-    def reload_board(board_id: str): return store.board_action(board_id, "reload")
+    def reload_board(board_id: str, force: bool = False):
+        return store.board_action(board_id, "force-reload" if force else "reload")
 
     @app.post("/api/boards/{board_id}/recover", dependencies=[Depends(writer)])
     def recover(board_id: str, cleanup_confirmed: bool = False):
@@ -155,7 +216,7 @@ def create_app(db_path=".data/galaxy.db", demo=False, token=None, read_token=Non
         return store.submit(plan, idempotency_key)
 
     @app.get("/api/batches", dependencies=[Depends(reader)])
-    def batches(): return store.batches()
+    def batches(): return workspace.batches()
 
     @app.get("/api/batches/{batch_id}", dependencies=[Depends(reader)])
     def batch(batch_id: str): return store.batch(batch_id)

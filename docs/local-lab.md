@@ -20,7 +20,7 @@ Start the control service from the project directory:
 
 ```sh
 uv sync --frozen
-uv run sg serve --demo
+uv run sg serve
 ```
 
 In another terminal, create a local Linux experiment board:
@@ -32,7 +32,7 @@ uv run sg lab status
 
 The first launch downloads a pinned Debian 12 ARM64 cloud image, verifies its SHA-512, creates a separate writable overlay, starts the VM, and installs a toolchain, builds the platform's native library, and registers the agent inside the guest. Guest and physical-board deployment share the Python dependency versions and hashes pinned in `deploy/requirements.txt`. Later launches reuse the existing disk and board identity; platform source changes trigger an update to the guest installation.
 
-Open the console and select the `QEMU` board in the device list. Built-in simulated devices still produce only synthetic data; the QEMU board uses the Linux execution module and actually runs uploaded code.
+Open the console and select the `QEMU` board in the device list. Synthetic samples are hidden by default; enable the console's demo switch when needed. The QEMU board uses the Linux execution module and actually runs uploaded code.
 
 Defaults are 4 vCPUs, 2 GiB of memory, and a 16 GiB sparse disk. CPU 0 is reserved for management. Matching architectures use HVF on macOS or can use KVM on Linux; `--accel tcg` selects software emulation. QEMU management ports bind only to the local host, and the guest connects to the control service through a private SSH tunnel.
 
@@ -91,6 +91,21 @@ uv run sg lab up --image /path/to/linux-cloud.qcow2 --image-sha512 SHA512_DIGEST
 ```
 
 The image needs cloud-init, OpenSSH, and a supported Linux userspace. `--arch x86_64` selects an x86_64 environment, `--firmware` specifies UEFI firmware, and `--wheelhouse` supplies Python dependency packages compatible with the guest architecture. Initial guest toolchain installation still needs access to package repositories unless the image already includes the toolchain.
+
+## Reload and Restart
+
+"Reload when idle" in device details waits for the current experiment to finish. "Force reload" interrupts it first, waits for cleanup, and then revalidates the module. New tasks are blocked during reload, and device details show any failure reason.
+
+```sh
+uv run sg reload BOARD_ID --force
+uv run sg lab restart
+uv run sg lab restart --force
+uv run sg labs
+```
+
+A normal restart stops the agent before rebooting the guest. A forced reset resets QEMU directly, so unsaved output from running work may be lost. The command immediately returns an operation ID; check completion with `sg labs` or the console. Admission resumes after the platform verifies a new guest boot ID and agent heartbeat. Experiment history retains interruption records.
+
+By default, the control service manages the `lab/` directory next to the database. For multiple instances, register directories explicitly when starting the service, for example: `sg serve --lab-state-dir .data/lab --lab-state-dir .data/lab-second`. The browser can operate only these configured instances and accepts neither local paths nor arbitrary commands. Physical boards support forced module reload; the QEMU restart button appears only for managed virtual devices.
 
 ## Stop the VM and Manage Local Files
 

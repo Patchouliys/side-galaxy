@@ -257,15 +257,15 @@ class Lab:
                     '-pidfile', str(self.root / 'qemu.pid'), '-daemonize']
         return command
 
-    def _tunnel(self, state, host, port):
+    def _tunnel(self, state, host, port, timeout=60):
         control = ['-S', str(self.root / 'ssh.sock')]
         options = self._ssh(state)
-        active = self._run(options + control + ['-O', 'check', 'galaxy@127.0.0.1'], check=False)
+        active = self._run(options + control + ['-O', 'check', 'galaxy@127.0.0.1'], check=False, timeout=min(timeout, 10))
         if active.returncode == 0: return
         target = '[' + host + ']' if ':' in host else host
         self._run(options + control + ['-M', '-fN', '-o', 'ExitOnForwardFailure=yes',
                   '-o', 'ServerAliveInterval=10', '-o', 'ServerAliveCountMax=3',
-                  '-R', f'127.0.0.1:{GUEST_PORT}:{target}:{port}', 'galaxy@127.0.0.1'])
+                  '-R', f'127.0.0.1:{GUEST_PORT}:{target}:{port}', 'galaxy@127.0.0.1'], timeout=timeout)
 
     def _install(self, state, source, source_hash, wheelhouse, timeout):
         self._remote(state, f'install -d -m 700 -o galaxy -g galaxy {GUEST_ROOT}\n')
@@ -398,8 +398,82 @@ rm -f {GUEST_ROOT}/agent.json
         if state is None: return {'status': 'absent'}
         running = self._running(state)
         return {'status': running or 'stopped', 'stage': state.get('stage'),
-                **{k: state.get(k) for k in ('instance_id', 'board_id', 'arch', 'cpus', 'memory_mib', 'ssh_port', 'source_sha256')},
+                **{k: state.get(k) for k in ('instance_id', 'board_id', 'arch', 'cpus', 'memory_mib', 'ssh_port', 'source_sha256', 'boot_id')},
                 'execution_mode': 'linux-process', 'synthetic': False}
+
+    def _boot_id(self, state, timeout=10):
+        result = self._remote(state, 'cat /proc/sys/kernel/random/boot_id\n', timeout=timeout)
+        try: return str(uuid.UUID(result.stdout.strip()))
+        except ValueError: raise ValueError('Guest did not provide a valid boot identity') from None
+
+    def restart(self, *, force=False, timeout=180, token=None):
+        """The caller must hold the control plane's admission-maintenance gate."""
+        if type(force) is not bool or type(timeout) is not int or not 30 <= timeout <= 900:
+            raise ValueError('Restart requires a boolean force flag and timeout of 30–900 seconds')
+        with self._lock():
+            state = self._read()
+            if not state or not state.get('board_id'): raise ValueError('Start and register this lab before restarting it')
+            deadline = time.monotonic() + timeout
+            def remaining(limit=30):
+                value = deadline - time.monotonic()
+                if value <= 0: raise ValueError('Lab restart timed out; guest readiness remains unconfirmed')
+                return min(limit, value)
+            try:
+                if self._running(state) != 'running': raise ValueError('Lab restart requires a running managed VM')
+                host, port = _endpoint(state['server'])
+                # A live baseline is required even for forced reset. Cached boot IDs
+                # cannot prove which guest incarnation owned interrupted work.
+                before = self._boot_id(state, timeout=remaining(10))
+                state.update(stage='restarting', boot_id=before)
+                self._write('state.json', state)
+                if force:
+                    self._qmp(state, 'system_reset')
+                else:
+                    self._remote(state, 'systemctl stop side-galaxy-agent.service\n', timeout=remaining(75))
+                    # SSH can disconnect after systemd accepts the reboot request.
+                    self._remote(state, 'systemctl reboot --no-block\n', timeout=remaining(10), check=False)
+                self._run(self._ssh(state) + ['-S', str(self.root / 'ssh.sock'), '-O', 'exit', 'galaxy@127.0.0.1'],
+                          timeout=remaining(5), check=False)
+                while True:
+                    remaining()
+                    if self._running(state) != 'running': raise ValueError('Lab VM stopped during restart')
+                    try: after = self._boot_id(state, timeout=remaining(10))
+                    except ValueError: after = None
+                    if after and after != before: break
+                    time.sleep(min(1, remaining()))
+                self._tunnel(state, host, port, timeout=remaining())
+                fresh_after = time.time()
+                client = Client(state['server'], token)
+                try:
+                    while True:
+                        remaining()
+                        active = self._remote(state, 'systemctl is-active --quiet side-galaxy-agent.service\n',
+                                              timeout=remaining(10), check=False)
+                        client.http.timeout = remaining(10)
+                        try: boards = client.request('GET', '/api/boards')
+                        except ValueError: boards = []
+                        board = next((b for b in boards if b['id'] == state['board_id']), None)
+                        if (active.returncode == 0 and board and (board.get('seen') or 0) > fresh_after
+                                and (board.get('description') or {}).get('mode') == 'linux-process'
+                                and board.get('reload_ack', 0) >= board.get('reload_requested', 0)
+                                and not board.get('reload_error')):
+                            break
+                        time.sleep(min(1, remaining()))
+                finally: client.http.close()
+                # Recheck identity before publishing completion evidence.
+                if self._running(state) != 'running': raise ValueError('Lab VM stopped before restart verification')
+                if self._boot_id(state, timeout=remaining(10)) != after:
+                    raise ValueError('Guest boot identity changed again during restart verification')
+                state.update(stage='ready', boot_id=after)
+                self._write('state.json', state)
+                return {**self.status(), 'force': force, 'boot_id_before': before, 'boot_id_after': after,
+                        'boot_changed': True, 'agent_ready': True}
+            except Exception as exc:
+                state['stage'] = 'restart-failed'
+                self._write('state.json', state)
+                if isinstance(exc, ValueError): raise
+                self._log('Lab restart failed: ' + type(exc).__name__ + '\n')
+                raise ValueError('Lab restart failed; inspect the private bootstrap log') from None
 
     def down(self, timeout=30):
         with self._lock():

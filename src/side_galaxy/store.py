@@ -80,6 +80,8 @@ class Store:
         return self._call("heartbeat", board_id=board_id, heartbeat=heartbeat.model_dump())
 
     def boards(self): return self._call("boards")
+    def workspace_mode(self): return self._call("workspace_mode")
+    def set_workspace_mode(self, enabled): return self._call("set_workspace_mode", enabled=enabled)
     def preflight(self, plan): return self._call("preflight", **self._plan(plan))
 
     def submit(self, plan, key):
@@ -87,14 +89,16 @@ class Store:
                           run_ids=[str(uuid.uuid4()) for _ in plan.boards], **self._plan(plan))
 
     def batch(self, batch_id): return self._call("batch", batch_id=batch_id)
-    def batches(self): return self._call("batches")
+    def batches(self, real_only=False): return self._call("batches", real_only=real_only)
     def poll(self, board_id): return self._call("poll", board_id=board_id)
 
     def finish(self, board_id, run_id, completion):
         return self._call("finish", board_id=board_id, run_id=run_id, completion=completion.model_dump())
 
     def cancel(self, batch_id): return self._call("cancel", batch_id=batch_id)
-    def board_action(self, board_id, action): return self._call("board_action", board_id=board_id, action=action)
+    def board_action(self, board_id, action, **evidence):
+        if action == "restart": evidence.setdefault("restart_id", str(uuid.uuid4()))
+        return self._call("board_action", board_id=board_id, action=action, **evidence)
 
     def artifact_for_agent(self, board_id, sha):
         with self.tx() as db:

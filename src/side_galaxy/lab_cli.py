@@ -18,11 +18,12 @@ IMAGE_HASHES = {
 
 
 def add_parser(sub):
-    lab = sub.add_parser('lab', help='Start, inspect, or stop a local QEMU Linux target')
+    lab = sub.add_parser('lab', help='Start, inspect, restart, or stop a local QEMU Linux target')
     commands = lab.add_subparsers(dest='lab_command', required=True)
-    for name in ('up', 'status', 'down'):
+    for name in ('up', 'status', 'restart', 'down'):
         command = commands.add_parser(name)
         command.add_argument('--state-dir', default='.data/lab')
+        if name == 'restart': command.add_argument('--force', action='store_true', help='Reset the guest immediately, interrupting active work')
         if name != 'up': continue
         command.add_argument('--arch', choices=IMAGE_HASHES, default='aarch64')
         command.add_argument('--image', help='Local cloud image; requires --image-sha512')
@@ -93,6 +94,18 @@ def execute(args):
     lab = Lab(args.state_dir)
     if args.lab_command == 'status': return lab.status()
     if args.lab_command == 'down': return lab.down()
+    if args.lab_command == 'restart':
+        from .client import Client
+        status = lab.status()
+        if not status.get('instance_id'): raise ValueError('Start and register this lab before restarting it')
+        client = Client(lab._read()['server'])
+        try:
+            return client.request('POST', '/api/labs/' + status['instance_id'] + '/restart', {'force': args.force})
+        except ValueError as exc:
+            if str(exc).startswith('HTTP 404:'):
+                raise ValueError('Register this lab directory with the control server before restarting it') from None
+            raise
+        finally: client.http.close()
     if args.image:
         if not args.image_sha512 or not re.fullmatch('[a-fA-F0-9]{128}', args.image_sha512):
             raise ValueError('--image requires a 128-character --image-sha512 digest')

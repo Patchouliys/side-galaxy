@@ -10,16 +10,17 @@ sudo apt-get install build-essential cmake libsqlite3-dev
 
 Both `uv sync` and wheel builds compile the required C++ core. At runtime, the application loads the native library matching the host platform; there is no Python scheduling fallback. See the [native build guide](native-build.md) for detailed steps.
 
-## Local Demo
+## Local Workspace
 
 ```sh
 uv sync --frozen
-uv run sg serve --demo
+uv run sg serve
 ```
 
-Open `http://127.0.0.1:7980`. The three simulated Pi boards and their metrics are labeled synthetic. Demo mode listens only on loopback and needs no physical development boards. Do not expose this mode to the public internet.
+Open `http://127.0.0.1:7980`. By default, only connected real devices are shown. A local workspace without tokens accepts only loopback access. The console's demo switch or `sg workspace --demo on` starts three simulated Pi boards; disabling it interrupts synthetic experiments and hides samples without affecting real devices. Enable demo mode before using the following example plan.
 
 ```sh
+uv run sg workspace --demo on
 uv run sg boards
 uv run sg preflight examples/pi-contention.json
 uv run sg submit examples/pi-contention.json --key first-experiment
@@ -92,7 +93,7 @@ Configure any compatible MCP stdio client, with command pointing to the installe
 {"mcpServers":{"side-galaxy":{"command":"sg","args":["mcp"],"env":{"SG_SERVER":"https://galaxy.example.com","SG_TOKEN":"SUPPLY_READ_TOKEN_VIA_SECRET_STORAGE"}}}}
 ```
 
-Default tools are list_boards, list_profiles, list_artifacts, preflight, get_batch, and get_output. If the task explicitly authorizes AI to operate experiment devices, change to `args:["mcp","--allow-writes"]` and use an operator token. This adds upload_artifact, run_experiment, cancel_batch, and reload_module. Enabling MCP write tools does not bypass server authorization, admission, or version checks. The token placeholder cannot establish a connection as written.
+Default tools are list_boards, list_profiles, list_artifacts, preflight, get_batch, get_output, get_workspace, and list_labs. If the task explicitly authorizes AI to operate experiment devices, change to `args:["mcp","--allow-writes"]` and use an operator token. This adds upload_artifact, run_experiment, replay_experiment, cancel_batch, reload_module, force_reload_module, restart_lab, and set_demo_mode. Enabling MCP write tools does not bypass server authorization, admission, or version checks. The token placeholder cannot establish a connection as written.
 
 ## Operations
 

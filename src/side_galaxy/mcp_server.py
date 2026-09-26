@@ -20,6 +20,16 @@ def create_mcp(allow_writes=False):
         return request("GET", "/api/boards")
 
     @server.tool(annotations=read)
+    def get_workspace() -> dict:
+        """Read actual demo activation and local access policy."""
+        return request('GET', '/api/workspace')
+
+    @server.tool(annotations=read)
+    def list_labs() -> list[dict]:
+        """List configured local QEMU instances and asynchronous restart progress."""
+        return request('GET', '/api/labs')
+
+    @server.tool(annotations=read)
     def list_profiles() -> dict:
         """List modular board and system profiles."""
         return request("GET", "/api/catalog")
@@ -75,6 +85,21 @@ def create_mcp(allow_writes=False):
 
         @server.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, openWorldHint=False))
         def reload_module(board_id: str) -> dict:
-            """Request validation and reload of already-deployed trusted module code at the next idle boundary."""
+            """Request validation and reload of deployed trusted module code after current work finishes."""
             return request("POST", f"/api/boards/{board_id}/reload")
+
+        @server.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, openWorldHint=False))
+        def force_reload_module(board_id: str) -> dict:
+            """Interrupt current work, wait for cleanup, then validate deployed module code. Unsafe cleanup keeps the board quarantined."""
+            return request('POST', f'/api/boards/{board_id}/reload?force=true')
+
+        @server.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, openWorldHint=False))
+        def restart_lab(instance_id: str, force: bool = False) -> dict:
+            """Restart a managed QEMU guest, interrupting experiments. Force resets without graceful shutdown. Returns an operation; poll list_labs until finished."""
+            return request('POST', f'/api/labs/{instance_id}/restart', {'force': force})
+
+        @server.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, openWorldHint=False))
+        def set_demo_mode(enabled: bool) -> dict:
+            """Enable synthetic samples or stop/hide them. Disabling interrupts synthetic experiments, preserving real targets and history."""
+            return request('PUT', '/api/workspace', {'demo': enabled})
     return server

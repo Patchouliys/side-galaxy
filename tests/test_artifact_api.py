@@ -34,6 +34,7 @@ class ArtifactAPITests(unittest.TestCase):
         self.operator = {'Authorization': 'Bearer operator-token-at-least-24-chars'}
         self.reader = {'Authorization': 'Bearer reader-token-at-least-24-chars'}
         self.store = self.app.state.store
+        self.store.set_workspace_mode(True)
         self.modules = Modules(self.root / 'modules', 'pi4', 'simulator')
         self.boards = [self.store.enroll(Enrollment(name=name)) for name in ['first', 'second']]
         for board in self.boards: self.store.heartbeat(board['board_id'], Heartbeat(description=self.modules.current[1]))
