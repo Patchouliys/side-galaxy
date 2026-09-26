@@ -49,6 +49,12 @@ uv run sg submit examples/pi-contention.json --key first-experiment
 uv run sg batches
 ```
 
+## Develop without hardware
+
+Start the control server, then run `uv run sg lab up` in another terminal. The local QEMU lab boots ARM64 Linux, builds the native core inside the guest, and registers a target that actually compiles and runs uploaded experiments. See the [local lab guide](docs/local-lab.md) for prerequisites and options.
+
+Select another target to reuse the same artifact and parameters, or run `sg replay SOURCE_BATCH_ID --boards TARGET_BOARD_ID --key deployment-001`. Declared architecture, OS, and command requirements are checked before admission.
+
 ## Bring your experiment
 
 An experiment ZIP contains `experiment.json` at its root alongside the code and input files:
@@ -82,6 +88,7 @@ Configure a compatible MCP client to run `sg mcp`, with `SG_SERVER` and `SG_TOKE
 
 The detailed guides are written in English.
 
+- [QEMU lab and experiment migration](docs/local-lab.md)
 - [Native core build and packaging](docs/native-build.md)
 - [Deployment and AI integration](docs/operations.md)
 - [Experiment bundles, dependencies, and results](docs/workloads.md)

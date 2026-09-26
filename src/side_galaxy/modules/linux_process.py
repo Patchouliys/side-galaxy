@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import platform
 import resource
+import runpy
 import shutil
 import signal
 import subprocess
@@ -13,6 +14,13 @@ import sys
 import tempfile
 import time
 import uuid
+
+
+def execution_environment():
+    runner = Path(__file__).with_suffix('.runner.py')
+    if not runner.is_file():
+        runner = Path(__file__).resolve().parents[1] / 'workload_runner.py'
+    return runpy.run_path(str(runner))['probe_execution_environment']()
 
 
 def describe():
@@ -23,7 +31,8 @@ def describe():
             "cpus": sorted(os.sched_getaffinity(0)), "reserved_cpus": [0],
             "memory_mib": max(128, mem // 2), "memory_limit_required": True,
             "cleanup_scope": "process-group", "capabilities": ["cpu-affinity", "memory-limit", "interference", "workload-bundle"],
-            "templates": ["cpu-contention", "memory-copy", "workload"]}
+            "templates": ["cpu-contention", "memory-copy", "workload"],
+            "execution_environment": execution_environment()}
 
 
 def worker(core, seconds, memory_mib, template, send):

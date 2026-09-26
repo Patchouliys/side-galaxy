@@ -49,6 +49,12 @@ uv run sg submit examples/pi-contention.json --key first-experiment
 uv run sg batches
 ```
 
+## 没有开发板也能开发
+
+启动控制服务后，在另一个终端运行 `uv run sg lab up`。本地 QEMU 环境会启动 ARM64 Linux，在 guest 内构建原生核心并注册设备，真正编译、运行上传的实验。依赖和配置见[本地实验指南](docs/local-lab.md)。
+
+选择其他目标即可复用原实验包和参数，也可运行 `sg replay SOURCE_BATCH_ID --boards TARGET_BOARD_ID --key deployment-001`。准入前会检查声明的架构、操作系统和命令要求。
+
 ## 使用自己的实验
 
 实验 ZIP 的根目录包含 `experiment.json`、代码及输入文件：
@@ -80,6 +86,7 @@ uv run sg artifact-upload .data/hello-workload.zip
 
 ## 文档
 
+- [QEMU 本地实验与目标迁移](docs/local-lab.md)
 - [原生核心构建与打包](docs/native-build.md)
 - [运行、部署与 AI 连接](docs/operations.md)
 - [实验代码、依赖与结果](docs/workloads.md)

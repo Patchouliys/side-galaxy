@@ -51,6 +51,19 @@ class Artifacts:
         except OSError as exc:
             raise KeyError(digest) from exc
 
+    def metadata(self, digest):
+        path = self.get(digest)
+        identity = self._identity(path)
+        cached = self._metadata.get(digest)
+        if cached is None or cached[0] != identity:
+            with path.open('rb') as stream:
+                data = stream.read(MAX_BUNDLE + 1)
+            if hashlib.sha256(data).hexdigest() != digest:
+                raise KeyError(digest)
+            metadata = {'sha256': digest, 'size': len(data), 'manifest': validate_bundle(data)}
+            self._metadata[digest] = (identity, metadata)
+        return self._metadata[digest][1]
+
     def list(self):
         result = []
         for path in sorted(self.root.glob('*.zip')):

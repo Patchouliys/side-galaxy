@@ -47,6 +47,12 @@ def main(argv=None):
         p = sub.add_parser(name)
         p.add_argument("id")
         if name == "recover": p.add_argument("--cleanup-confirmed", action="store_true")
+    replay = sub.add_parser("replay", aliases=["migrate"])
+    replay.add_argument("id", help="Source batch ID")
+    replay.add_argument("--boards", nargs="+", required=True, help="Replacement target board IDs")
+    replay.add_argument("--key", required=True, help="New idempotency key for the replay")
+    from .lab_cli import add_parser as add_lab_parser
+    add_lab_parser(sub)
     enroll = sub.add_parser("enroll")
     enroll.add_argument("--name", required=True)
     enroll.add_argument("--board-profile", default="generic")
@@ -61,6 +67,10 @@ def main(argv=None):
     mcp.add_argument("--allow-writes", action="store_true")
     args = parser.parse_args(argv)
     try:
+        if args.command == "lab":
+            from .lab_cli import execute
+            output(execute(args))
+            return
         if args.command == "pack":
             from .workload_runner import validate_bundle, MAX_BUNDLE, MAX_EXPANDED
             root = Path(args.directory).resolve(strict=True)
@@ -150,6 +160,8 @@ def main(argv=None):
                 plan = Plan.model_validate_json(text)
                 output(client.request("POST", "/api/preflight" if args.command == "preflight" else "/api/batches", plan.model_dump(), getattr(args, "key", None)))
             elif args.command == "batch": output(client.request("GET", "/api/batches/" + args.id))
+            elif args.command in ("replay", "migrate"):
+                output(client.request("POST", f"/api/batches/{args.id}/replay", {"boards": args.boards}, args.key))
             elif args.command == "cancel": output(client.request("POST", "/api/batches/" + args.id + "/cancel"))
             elif args.command in ("reload", "recover"):
                 suffix = "?cleanup_confirmed=true" if getattr(args, "cleanup_confirmed", False) else ""

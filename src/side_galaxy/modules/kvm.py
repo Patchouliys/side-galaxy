@@ -1,10 +1,12 @@
 """Live experiments in one administrator-configured, dedicated libvirt domain."""
 import base64
 import hashlib
+import inspect
 import json
 import os
 from pathlib import Path
 import signal
+import runpy
 import subprocess
 import sys
 import time
@@ -109,16 +111,34 @@ def guest_available(dom):
         return False
 
 
+def guest_environment(dom):
+    runner = Path(__file__).with_suffix('.runner.py')
+    if not runner.is_file():
+        runner = Path(__file__).resolve().parents[1] / 'workload_runner.py'
+    probe = runpy.run_path(str(runner))['probe_execution_environment']
+    code = 'import json\n' + inspect.getsource(probe) + '\nprint(json.dumps(probe_execution_environment()))'
+    status = guest_command(dom, ['-c', code])
+    if status.get('out-truncated') or len(status.get('out-data', '')) > 512 * 1024:
+        raise ValueError('Guest environment probe output was truncated or oversized')
+    value = json.loads(base64.b64decode(status.get('out-data', ''), validate=True))
+    if not isinstance(value, dict):
+        raise ValueError('Invalid guest environment probe')
+    return value
+
+
 def describe():
     dom = domain()
     if virsh("domstate", dom) != "running": raise ValueError("Dedicated VM must be running")
     capabilities, templates = ["cpu-affinity"], ["kvm-affinity"]
+    environment = None
     if guest_available(dom):
         capabilities += ["workload-bundle", "guest-agent"]
         templates.append("workload")
+        try: environment = guest_environment(dom)
+        except (ValueError, RuntimeError, OSError, subprocess.SubprocessError): pass
     return {"protocol": 1, "name": "KVM live experiments", "mode": "kvm",
             "cpus": sorted(os.sched_getaffinity(0)), "reserved_cpus": [0], "memory_mib": 128,
-            "capabilities": capabilities, "templates": templates}
+            "capabilities": capabilities, "templates": templates, "execution_environment": environment}
 
 
 def guest_upload(dom, target, source, deadline, cancelled):

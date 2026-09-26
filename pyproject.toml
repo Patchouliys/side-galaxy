@@ -22,7 +22,7 @@ exclude = ["src/side_galaxy/_native/*"]
 path = "hatch_build.py"
 
 [tool.hatch.build.targets.sdist]
-include = ["/src", "/native", "/CMakeLists.txt", "/hatch_build.py", "/pyproject.toml", "/README.md", "/README.zh-CN.md", "/LICENSE", "/THIRD_PARTY.md", "/docs/native-build.md"]
+include = ["/src", "/native", "/CMakeLists.txt", "/hatch_build.py", "/pyproject.toml", "/README.md", "/README.zh-CN.md", "/LICENSE", "/THIRD_PARTY.md", "/docs/native-build.md", "/deploy/requirements.txt"]
 exclude = ["src/side_galaxy/_native", "native/build", "**/__pycache__", "**/*.pyc"]
 
 [tool.uv]

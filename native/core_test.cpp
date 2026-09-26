@@ -190,6 +190,47 @@ int main() {
         fixture.bad("submit", Json::object(), "invalid");
         fixture.good("init");
         require(fixture.good("batches").size() == 4, "Reinitializing schema changed existing history");
+        Fixture compatibility;
+        enroll(compatibility);
+        auto portable = submission("portable", artifact_plan);
+        portable["artifact_requirements"] = {{"architectures", {"aarch64"}}, {"os", "linux"}, {"commands", {"cc"}}};
+        auto checked = compatibility.good("preflight", portable);
+        require(!checked.at("valid").get<bool>() && checked.at("errors")[0].at("reasons").dump().find("unknown") != std::string::npos,
+                "Missing environment discovery must fail closed");
+        auto target = description();
+        target["execution_environment"] = {{"architecture", "aarch64"}, {"os", "linux"},
+                                            {"commands", {"cc", "python3"}}, {"commands_complete", true}};
+        auto report = [&](const char* board) {
+            compatibility.good("heartbeat", {{"board_id", board}, {"heartbeat", {{"description", target}}}});
+        };
+        report("alpha");
+        require(compatibility.good("preflight", portable).at("valid").get<bool>(), "Compatible environment rejected");
+        target["execution_environment"]["architecture"] = "x86_64";
+        report("beta");
+        auto mixed = portable;
+        mixed["plan"]["boards"] = {"alpha", "beta"};
+        mixed["run_ids"] = {"portable-alpha", "portable-beta"};
+        compatibility.bad("submit", mixed, "conflict");
+        require(compatibility.good("batches").empty(), "Environment mismatch admitted part of a batch");
+        target["execution_environment"]["architecture"] = "aarch64";
+        target["execution_environment"]["os"] = "darwin";
+        report("alpha");
+        checked = compatibility.good("preflight", portable);
+        require(!checked.at("valid").get<bool>() && checked.at("errors")[0].at("reasons").dump().find("OS mismatch") != std::string::npos,
+                "Operating system mismatch accepted");
+        target["execution_environment"]["os"] = "linux";
+        target["execution_environment"]["commands"] = Json::array();
+        report("alpha");
+        checked = compatibility.good("preflight", portable);
+        require(!checked.at("valid").get<bool>() && checked.at("errors")[0].at("reasons").dump().find("command missing") != std::string::npos,
+                "Missing command accepted");
+        target["execution_environment"]["commands_complete"] = false;
+        report("alpha");
+        checked = compatibility.good("preflight", portable);
+        require(!checked.at("valid").get<bool>() && checked.at("errors")[0].at("reasons").dump().find("incomplete inventory") != std::string::npos,
+                "Incomplete inventory presented as a complete command list");
+        portable["artifact_requirements"] = Json::object();
+        require(compatibility.good("preflight", portable).at("valid").get<bool>(), "Legacy bundle acquired environment requirements");
         std::cout << "Native SQLite transaction, concurrency, lifecycle and ABI checks passed\n";
         return 0;
     } catch (const std::exception& error) {

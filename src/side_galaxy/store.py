@@ -60,11 +60,12 @@ class Store:
 
     def _plan(self, plan):
         body = plan.model_dump()
-        available = True
+        available, requirements = True, {}
         if plan.artifact_sha256:
-            try: self.artifacts.get(plan.artifact_sha256)
-            except KeyError: available = False
-        return {"plan": body, "plan_sha256": digest(canonical(body)), "artifact_available": available}
+            try: requirements = self.artifacts.metadata(plan.artifact_sha256)['manifest'].get('requires', {})
+            except (KeyError, ValueError): available = False
+        return {"plan": body, "plan_sha256": digest(canonical(body)), "artifact_available": available,
+                "artifact_requirements": requirements}
 
     def enroll(self, data, local=False, board_id=None):
         token = secrets.token_urlsafe(32)

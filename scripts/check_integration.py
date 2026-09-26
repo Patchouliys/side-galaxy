@@ -30,6 +30,7 @@ async def protocol():
                 names = {tool.name for tool in (await session.list_tools()).tools}
                 assert ('run_experiment' in names) == writes
                 assert ('upload_artifact' in names) == writes
+                assert ('replay_experiment' in names) == writes
                 assert {'list_artifacts', 'get_output'} <= names
                 assert not (await session.call_tool('list_boards')).isError
                 if writes:
@@ -51,6 +52,16 @@ async def protocol():
                         if all(r['state']=='succeeded' for r in data['runs']): break
                         await asyncio.sleep(.2)
                     assert all(r['state']=='succeeded' for r in data['runs']), data
+                    replayed = await session.call_tool('replay_experiment', {'batch_id':batch['id'], 'boards':['pi4-lab'], 'idempotency_key':'replay-'+str(uuid.uuid4())})
+                    assert not replayed.isError, replayed
+                    replay = json.loads(replayed.content[0].text)
+                    assert replay['id'] != batch['id'] and replay['plan']['artifact_sha256'] == artifact['sha256']
+                    for _ in range(40):
+                        result = await session.call_tool('get_batch', {'batch_id':replay['id']})
+                        replay_data = json.loads(result.content[0].text)
+                        if all(r['state']=='succeeded' for r in replay_data['runs']): break
+                        await asyncio.sleep(.2)
+                    assert all(r['state']=='succeeded' for r in replay_data['runs']), replay_data
     print('MCP stdio: initialize, tools/list, read-only policy, preflight, submit, results OK')
 
 

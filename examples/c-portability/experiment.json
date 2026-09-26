@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "name": "C portability check",
+  "description": "Compile and execute this C source inside the selected ARM64 Linux environment.",
+  "requires": {
+    "architectures": ["aarch64"],
+    "os": "linux",
+    "commands": ["cc"]
+  },
+  "setup": [["cc", "-std=c11", "-O2", "-Wall", "-Wextra", "main.c", "-o", "portability-check"]],
+  "run": ["./portability-check"],
+  "env": {},
+  "outputs": ["result.json"]
+}

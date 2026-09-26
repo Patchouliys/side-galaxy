@@ -261,6 +261,33 @@ Json batch_view(Database& db, const Json& batch_id) {
     return result;
 }
 
+void check_environment(Json& reasons, const Json& requirements, const Json& description) {
+    if (!requirements.is_object()) invalid("Artifact requirements must be an object");
+    const auto architectures = requirements.value("architectures", Json::array());
+    const auto commands = requirements.value("commands", Json::array());
+    if (!architectures.is_array() || !commands.is_array()) invalid("Invalid artifact environment requirements");
+    if (architectures.empty() && commands.empty() && !requirements.contains("os")) return;
+    const auto environment = description.value("execution_environment", Json(nullptr));
+    if (!environment.is_object()) {
+        reasons.push_back("execution environment unknown; update or reload the target module");
+        return;
+    }
+    const auto architecture = environment.value("architecture", std::string("unknown"));
+    if (!architectures.empty() && !contains(architectures, architecture))
+        reasons.push_back("execution architecture mismatch: requires " + architectures.dump() + "; target " + architecture);
+    const auto operating_system = environment.value("os", std::string("unknown"));
+    if (requirements.contains("os") && requirements.at("os") != operating_system)
+        reasons.push_back("execution OS mismatch: requires " + requirements.at("os").get<std::string>() + "; target " + operating_system);
+    const auto available = environment.value("commands", Json::array());
+    for (const auto& command : commands) {
+        if (!contains(available, command)) {
+            const char* message = environment.value("commands_complete", false)
+                ? "required execution command missing: " : "required command not confirmed (incomplete inventory): ";
+            reasons.push_back(std::string(message) + command.get<std::string>());
+        }
+    }
+}
+
 Json check_plan(Database& db, const Json& payload) {
     const auto& plan = payload.at("plan");
     const auto plan_hash = hash_field(payload, "plan_sha256");
@@ -303,6 +330,8 @@ Json check_plan(Database& db, const Json& payload) {
         if (!plan.value("bandwidth_percent", Json(nullptr)).is_null() && !contains(caps, "bandwidth-limit"))
             reasons.push_back("hardware bandwidth control unsupported");
         if (!plan.at("interference_cpus").empty() && !contains(caps, "interference")) reasons.push_back("module does not support interferers");
+        if (plan.at("template") == "workload")
+            check_environment(reasons, payload.value("artifact_requirements", Json::object()), description);
         if (!reasons.empty()) errors.push_back({{"board_id", board_id}, {"reasons", std::move(reasons)}});
         targets.push_back({{"board_id", board_id}, {"name", board.at("name")}, {"mode", description.value("mode", Json(nullptr))},
                            {"module_sha256", description.value("module_sha256", Json(nullptr))}});

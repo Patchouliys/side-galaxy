@@ -45,7 +45,7 @@ jobs:
           source, = Path('dist').glob('*.tar.gz')
           with tarfile.open(source) as archive:
               names = archive.getnames()
-              for suffix in ('/hatch_build.py', '/CMakeLists.txt', '/native/core.cpp', '/native/vendor/nlohmann/json.hpp'):
+              for suffix in ('/hatch_build.py', '/CMakeLists.txt', '/native/core.cpp', '/native/vendor/nlohmann/json.hpp', '/deploy/requirements.txt'):
                   assert any(name.endswith(suffix) for name in names), suffix
               assert not any('/_native/' in name for name in names)
           PY

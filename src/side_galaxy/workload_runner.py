@@ -8,6 +8,8 @@ import math
 import os
 from pathlib import Path, PurePosixPath
 import selectors
+import re
+import shutil
 import signal
 import stat
 import subprocess
@@ -49,10 +51,79 @@ def validate_arguments(argv, command=False):
     return argv
 
 
+def validate_requirements(requirements):
+    if not isinstance(requirements, dict) or set(requirements) - {'architectures', 'os', 'commands'}:
+        raise ValueError('requires must contain only architectures, os and commands')
+    architectures = requirements.get('architectures', [])
+    if (not isinstance(architectures, list) or len(architectures) > 16
+            or any(not isinstance(value, str) or not re.fullmatch(r'[a-z0-9][a-z0-9_-]{0,31}', value)
+                   or value in ('arm64', 'amd64', 'x64', 'i386', 'i486', 'i586') for value in architectures)
+            or len(set(architectures)) != len(architectures)):
+        raise ValueError('requires.architectures must list unique canonical architecture IDs such as aarch64 or x86_64')
+    if 'architectures' in requirements and not architectures:
+        raise ValueError('requires.architectures must not be empty when declared')
+    if 'os' in requirements and (not isinstance(requirements['os'], str)
+                                or not re.fullmatch(r'[a-z0-9][a-z0-9_-]{0,31}', requirements['os'])):
+        raise ValueError('requires.os must be a lowercase OS identifier such as linux')
+    commands = requirements.get('commands', [])
+    if (not isinstance(commands, list) or len(commands) > 32
+            or any(not isinstance(command, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._+-]{0,63}', command)
+                   for command in commands) or len(set(commands)) != len(commands)):
+        raise ValueError('requires.commands must list at most 32 unique executable names without paths')
+    return requirements
+
+
+def probe_execution_environment(path=None):
+    # Self-contained so a pinned copy of this exact probe can also execute inside a KVM guest.
+    import os
+    import platform
+    import re
+    import struct
+
+    architecture = platform.machine().lower()
+    architecture = {'arm64': 'aarch64', 'amd64': 'x86_64', 'x64': 'x86_64',
+                    'i386': 'i686', 'i486': 'i686', 'i586': 'i686'}.get(architecture, architecture)
+    if struct.calcsize('P') == 4:
+        architecture = {'aarch64': 'armv7l', 'x86_64': 'i686'}.get(architecture, architecture)
+    commands, complete, examined = set(), True, 0
+    for directory in (os.environ.get('PATH', os.defpath) if path is None else path).split(os.pathsep):
+        try:
+            with os.scandir(directory or os.curdir) as entries:
+                for entry in entries:
+                    examined += 1
+                    if (re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._+-]{0,63}', entry.name)
+                            and entry.is_file() and os.access(entry.path, os.X_OK)):
+                        commands.add(entry.name)
+                    if len(commands) >= 4096 or examined >= 32768:
+                        complete = False
+                        break
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        except OSError:
+            complete = False
+        if len(commands) >= 4096 or examined >= 32768:
+            break
+    return {'architecture': architecture, 'os': platform.system().lower(),
+            'commands': sorted(commands), 'commands_complete': complete}
+
+
+def check_runtime_requirements(requirements, execution_environment, path):
+    validate_requirements(requirements)
+    if requirements.get('architectures') and execution_environment['architecture'] not in requirements['architectures']:
+        raise ValueError('Execution architecture mismatch: requires ' + ', '.join(requirements['architectures'])
+                         + '; target ' + execution_environment['architecture'])
+    if requirements.get('os') and execution_environment['os'] != requirements['os']:
+        raise ValueError('Execution OS mismatch: requires ' + requirements['os'] + '; target ' + execution_environment['os'])
+    # Check requested commands directly even when the bounded inventory was incomplete.
+    missing = [command for command in requirements.get('commands', []) if shutil.which(command, path=path) is None]
+    if missing:
+        raise ValueError('Required execution command missing: ' + ', '.join(missing))
+
+
 def validate_manifest(manifest):
     if not isinstance(manifest, dict) or type(manifest.get('schema')) is not int or manifest['schema'] != 1:
         raise ValueError('experiment.json must use schema 1')
-    if set(manifest) - {'schema', 'name', 'description', 'setup', 'run', 'env', 'outputs'}:
+    if set(manifest) - {'schema', 'name', 'description', 'setup', 'run', 'env', 'outputs', 'requires'}:
         raise ValueError('Unknown manifest field')
     if not isinstance(manifest.get('name'), str) or not 1 <= len(manifest['name']) <= 80:
         raise ValueError('Manifest requires a name (1-80 characters)')
@@ -64,6 +135,7 @@ def validate_manifest(manifest):
     for argv in commands + [manifest.get('run')]:
         validate_arguments(argv, command=True)
     validate_environment(manifest.get('env', {}))
+    validate_requirements(manifest.get('requires', {}))
     outputs = manifest.get('outputs', [])
     if not isinstance(outputs, list) or len(outputs) > 32:
         raise ValueError('outputs must list at most 32 relative files')
@@ -251,6 +323,10 @@ def execute(bundle, workspace, seconds, arguments=None, environment=None, artifa
         env.update(manifest.get('env', {}))
         env.update(environment)
         env.update({'SG_WORKSPACE': str(workspace), 'PYTHONUNBUFFERED': '1'})
+        execution_path = os.pathsep.join(str(workspace / part) if not os.path.isabs(part) else part
+                                        for part in env.get('PATH', os.defpath).split(os.pathsep))
+        result['execution_environment'] = probe_execution_environment(execution_path)
+        check_runtime_requirements(manifest.get('requires', {}), result['execution_environment'], execution_path)
         commands = [('setup', argv) for argv in manifest.get('setup', [])] + [('run', manifest['run'] + arguments)]
         for phase, argv in commands:
             check_deadline()

@@ -10,10 +10,15 @@ from urllib.parse import quote
 from .workload_runner import MAX_BUNDLE
 from fastapi.staticfiles import StaticFiles
 
-from .models import Completion, Enrollment, Heartbeat, Plan
+from pydantic import Field
+from .models import Completion, Enrollment, Heartbeat, Plan, Strict
 from .profiles import catalog
 from .runtime import Agent, LocalClient, Modules
 from .store import Conflict, Store
+
+class ReplayRequest(Strict):
+    boards: list[str] = Field(min_length=1, max_length=32)
+
 
 STATIC = Path(__file__).with_name("static")
 
@@ -154,6 +159,16 @@ def create_app(db_path=".data/galaxy.db", demo=False, token=None, read_token=Non
 
     @app.get("/api/batches/{batch_id}", dependencies=[Depends(reader)])
     def batch(batch_id: str): return store.batch(batch_id)
+
+    @app.post("/api/batches/{batch_id}/replay", dependencies=[Depends(writer)], status_code=201)
+    def replay(batch_id: str, data: ReplayRequest, idempotency_key: str = Header(min_length=1, max_length=128)):
+        source = store.batch(batch_id)
+        try: plan = Plan.model_validate({**source["plan"], "boards": data.boards})
+        except ValueError: raise HTTPException(422, "Invalid replay targets") from None
+        result = store.submit(plan, idempotency_key)
+        if result["id"] == source["id"]:
+            raise HTTPException(422, "Replay requires a new idempotency key")
+        return result
 
     @app.post("/api/batches/{batch_id}/cancel", dependencies=[Depends(writer)])
     def cancel(batch_id: str): return store.cancel(batch_id)

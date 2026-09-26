@@ -5,6 +5,8 @@ import io
 import json
 import os
 from pathlib import Path
+import platform
+import shutil
 import signal
 import stat
 import subprocess
@@ -20,9 +22,12 @@ import httpx
 
 from side_galaxy.cli import main as cli_main
 from side_galaxy.client import Client
-from side_galaxy.models import Completion
+from side_galaxy.models import Completion, ExecutionEnvironment, Plan
 from side_galaxy.artifacts import Artifacts
-from side_galaxy.workload_runner import MAX_EXPANDED, MAX_LOG, MAX_OUTPUTS, execute, validate_bundle
+from side_galaxy.modules import kvm, linux_process
+from side_galaxy.store import Store
+from side_galaxy.workload_runner import (MAX_EXPANDED, MAX_LOG, MAX_OUTPUTS, execute,
+                                        probe_execution_environment, validate_bundle)
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER = ROOT / 'src/side_galaxy/workload_runner.py'
@@ -302,6 +307,144 @@ class WorkloadTests(unittest.TestCase):
                 artifacts.get(digest)
         artifacts.put(data)
         self.assertEqual(artifacts.list(), [entry])
+
+    def test_portability_manifest_rejects_ambiguous_or_unbounded_requirements(self):
+        manifest = {'schema': 1, 'name': 'portability', 'run': ['echo']}
+        for requirements in [None, [], {'unknown': []}, {'architectures': []},
+                             {'architectures': ['arm64']}, {'architectures': ['aarch64', 'aarch64']},
+                             {'architectures': [{}]}, {'os': 'Linux'}, {'os': False},
+                             {'commands': ['/usr/bin/cc']}, {'commands': ['cc', 'cc']},
+                             {'commands': ['x' * 65]}, {'commands': [str(i) for i in range(33)]}]:
+            with self.subTest(requirements=requirements), self.assertRaises(ValueError):
+                validate_bundle(bundle({**manifest, 'requires': requirements}))
+        valid = {'architectures': ['aarch64', 'x86_64'], 'os': 'linux', 'commands': ['cc', 'python3']}
+        self.assertEqual(validate_bundle(bundle({**manifest, 'requires': valid}))['requires'], valid)
+        self.assertNotIn('requires', validate_bundle(bundle(manifest)))
+
+    def test_runner_rechecks_requirements_before_any_setup(self):
+        environment = probe_execution_environment('')
+        requirements = [({'architectures': ['incompatible']}, 'architecture mismatch'),
+                        ({'os': 'incompatible'}, 'OS mismatch'),
+                        ({'commands': ['side-galaxy-command-does-not-exist']}, 'command missing')]
+        for index, (requires, error) in enumerate(requirements):
+            with self.subTest(requires=requires):
+                path = self.root / (str(index) + '.zip')
+                path.write_bytes(bundle({'schema': 1, 'name': 'recheck', 'requires': requires,
+                                         'setup': [[sys.executable, '-c', 'open("started","w").close()']],
+                                         'run': [sys.executable, '-c', 'print("not reached")']}))
+                workspace = self.root / ('work' + str(index))
+                result = execute(path, workspace, 3)
+                self.assertIn(error, result['error'])
+                self.assertEqual(result['exit_code'], 125)
+                self.assertEqual(result['steps'], [])
+                self.assertTrue(result['cleanup_ok'])
+                self.assertFalse((workspace / 'started').exists())
+        result = self.run_code('print("compatible")', requires={
+            'architectures': [environment['architecture']], 'os': environment['os']})
+        self.assertEqual(result['exit_code'], 0)
+        self.assertEqual(result['stdout'].strip(), 'compatible')
+
+    def test_runner_checks_effective_path_and_inventory_hides_directories(self):
+        tools = self.root / 'tools'
+        tools.mkdir()
+        (tools / 'present').write_text('#!/bin/sh\nexit 0\n')
+        (tools / 'present').chmod(0o700)
+        (tools / 'not-executable').write_text('data')
+        environment = probe_execution_environment(str(tools))
+        self.assertEqual(environment['commands'], ['present'])
+        self.assertTrue(environment['commands_complete'])
+        self.assertNotIn(str(tools), json.dumps(environment))
+        path = self.root / 'custom-path.zip'
+        path.write_bytes(bundle({'schema': 1, 'name': 'path', 'requires': {'commands': ['present']},
+                                 'run': [sys.executable, '-c', 'print("effective path")']}))
+        result = execute(path, self.root / 'work', 3, environment={'PATH': str(tools)})
+        self.assertEqual(result['exit_code'], 0)
+        self.assertEqual(result['execution_environment']['commands'], ['present'])
+        result = execute(path, self.root / 'missing-path-work', 3, environment={'PATH': str(self.root / 'missing')})
+        self.assertIn('command missing', result['error'])
+        self.assertEqual(result['steps'], [])
+
+    def test_probe_architecture_aliases_inventory_limit_and_model_bounds(self):
+        from types import SimpleNamespace
+
+        class Entries:
+            def __enter__(self):
+                return (SimpleNamespace(name='tool' + str(i), path='/bin/tool' + str(i),
+                                        is_file=lambda: True) for i in range(4097))
+
+            def __exit__(self, *args):
+                pass
+
+        with patch('os.scandir', return_value=Entries()), patch('os.access', return_value=True), \
+             patch('platform.machine', return_value='arm64'), patch('struct.calcsize', return_value=8):
+            environment = probe_execution_environment('/bin')
+        self.assertEqual(environment['architecture'], 'aarch64')
+        self.assertEqual(len(environment['commands']), 4096)
+        self.assertFalse(environment['commands_complete'])
+        ExecutionEnvironment(**environment)
+        with self.assertRaises(ValueError):
+            ExecutionEnvironment(**{**environment, 'commands': environment['commands'] + ['overflow']})
+        with self.assertRaises(ValueError):
+            ExecutionEnvironment(**{**environment, 'commands': ['/bin/cc']})
+
+    def test_linux_and_kvm_share_probe_but_kvm_executes_it_in_guest(self):
+        local = linux_process.execution_environment()
+        self.assertEqual(local['architecture'], probe_execution_environment('')['architecture'])
+        guest = {'architecture': 'x86_64', 'os': 'linux', 'commands': ['cc'], 'commands_complete': True}
+
+        def command(domain, argv):
+            self.assertEqual(domain, 'guest-domain')
+            self.assertEqual(argv[0], '-c')
+            # The exact source sent to QGA also runs independently of package imports.
+            completed = subprocess.run([sys.executable, *argv], text=True, capture_output=True, timeout=5, check=True)
+            self.assertEqual(json.loads(completed.stdout)['architecture'], local['architecture'])
+            return {'out-data': base64.b64encode(json.dumps(guest).encode()).decode(), 'exitcode': 0}
+
+        with patch.object(kvm, 'guest_command', side_effect=command):
+            self.assertEqual(kvm.guest_environment('guest-domain'), guest)
+        with patch.object(kvm, 'guest_command', return_value={'out-truncated': True}):
+            with self.assertRaisesRegex(ValueError, 'truncated'):
+                kvm.guest_environment('guest-domain')
+        with patch.object(kvm, 'domain', return_value='guest-domain'), \
+             patch.object(kvm, 'virsh', return_value='running'), \
+             patch.object(kvm.os, 'sched_getaffinity', return_value={0, 1}, create=True), \
+             patch.object(kvm, 'guest_available', return_value=True), \
+             patch.object(kvm, 'guest_environment', side_effect=ValueError('probe unavailable')):
+            description = kvm.describe()
+        self.assertIsNone(description['execution_environment'])
+        self.assertIn('workload', description['templates'])
+
+    def test_store_passes_verified_requirements_and_legacy_default_to_native(self):
+        store = Store.__new__(Store)
+        store.artifacts = Artifacts(self.root / 'artifacts')
+        requires = {'architectures': ['aarch64'], 'os': 'linux', 'commands': ['cc']}
+        manifest = {'schema': 1, 'name': 'portable', 'run': ['cc'], 'requires': requires}
+        artifact = store.artifacts.put(bundle(manifest))
+        plan = Plan(boards=['target'], template='workload', interference_cpus=[], artifact_sha256=artifact['sha256'])
+        payload = store._plan(plan)
+        self.assertTrue(payload['artifact_available'])
+        self.assertEqual(payload['artifact_requirements'], requires)
+        self.assertEqual(store.artifacts.list()[0]['manifest']['requires'], requires)
+        store.artifacts.get(artifact['sha256']).write_bytes(b'tampered')
+        self.assertFalse(store._plan(plan)['artifact_available'])
+        legacy = store.artifacts.put(bundle())
+        plan.artifact_sha256 = legacy['sha256']
+        self.assertEqual(store._plan(plan)['artifact_requirements'], {})
+
+    @unittest.skipUnless(shutil.which('cc'), 'local C compiler unavailable')
+    def test_c_example_compiles_and_reports_actual_local_environment(self):
+        source = ROOT / 'examples/c-portability/main.c'
+        executable = self.root / 'portability-check'
+        subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', str(source), '-o', str(executable)],
+                       capture_output=True, timeout=30, check=True)
+        completed = subprocess.run([str(executable), '--iterations', '17'], cwd=self.root,
+                                   capture_output=True, text=True, timeout=5, check=True)
+        result = json.loads(completed.stdout)
+        self.assertEqual(result, json.loads((self.root / 'result.json').read_text()))
+        self.assertEqual(result['iterations'], 17)
+        self.assertEqual(result['os'], platform.system())
+        self.assertEqual(result['machine'], platform.machine())
+        self.assertNotIn(str(self.root), completed.stdout)
 
 
 if __name__ == '__main__':

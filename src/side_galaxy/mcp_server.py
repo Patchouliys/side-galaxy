@@ -64,6 +64,11 @@ def create_mcp(allow_writes=False):
             return request("POST", "/api/batches", plan.model_dump(), idempotency_key)
 
         @server.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False))
+        def replay_experiment(batch_id: str, boards: list[str], idempotency_key: str) -> dict:
+            """Reuse a batch's artifact and parameters on replacement targets after fresh atomic admission. Use a new key; the source batch is preserved."""
+            return request("POST", f"/api/batches/{batch_id}/replay", {"boards": boards}, idempotency_key)
+
+        @server.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False))
         def cancel_batch(batch_id: str) -> dict:
             """Request cancellation. Wait for agent cleanup acknowledgement."""
             return request("POST", f"/api/batches/{batch_id}/cancel")

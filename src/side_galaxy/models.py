@@ -3,7 +3,7 @@ import json
 import base64
 import hashlib
 from .workload_runner import MAX_OUTPUTS, relative_path
-from typing import Literal
+from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
@@ -52,6 +52,13 @@ class Enrollment(Strict):
     system_profile: str = Field(default="simulator", pattern=r"^[a-z0-9-]{1,64}$")
 
 
+class ExecutionEnvironment(Strict):
+    architecture: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]{0,31}$")
+    os: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]{0,31}$")
+    commands: list[Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$")]] = Field(default_factory=list, max_length=4096)
+    commands_complete: bool = False
+
+
 class Description(Strict):
     protocol: Literal[1] = 1
     name: str = Field(max_length=64)
@@ -63,6 +70,7 @@ class Description(Strict):
     templates: list[str] = Field(min_length=1, max_length=64)
     module_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     memory_limit_required: bool = False
+    execution_environment: ExecutionEnvironment | None = None
     cleanup_scope: Literal["process-group", "external"] = "external"
 
 
