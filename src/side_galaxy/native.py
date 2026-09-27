@@ -27,6 +27,8 @@ def library():
     core.sg_core_call.restype = ctypes.c_void_p
     core.sg_core_free.argtypes = [ctypes.c_void_p]
     core.sg_core_free.restype = None
+    core.sg_host_call.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
+    core.sg_host_call.restype = ctypes.c_void_p
     return core
 
 
@@ -40,4 +42,14 @@ def call(path, operation, payload=None):
     if not response['ok']:
         error = response['error']
         raise NativeError(error['kind'], error['message'])
+    return response['value']
+
+
+def host_call(operation, payload=None):
+    core = library()
+    pointer = core.sg_host_call(operation.encode(), json.dumps(payload or {}).encode())
+    if not pointer: raise RuntimeError('Native host helper allocation failed')
+    try: response = json.loads(ctypes.string_at(pointer))
+    finally: core.sg_core_free(pointer)
+    if not response['ok']: raise NativeError(response['error']['kind'], response['error']['message'])
     return response['value']

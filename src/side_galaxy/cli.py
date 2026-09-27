@@ -31,6 +31,9 @@ def main(argv=None):
     workspace.add_argument('--demo', choices=['on', 'off'])
     sub.add_parser('labs', help='List managed QEMU instances and restart operations')
     sub.add_parser("boards")
+    telemetry = sub.add_parser('telemetry', help='Read bounded measured device history and physical-host allocations')
+    telemetry.add_argument('board')
+    telemetry.add_argument('--limit', type=int, default=60)
     sub.add_parser("profiles")
     sub.add_parser("batches")
     sub.add_parser("artifacts")
@@ -69,6 +72,8 @@ def main(argv=None):
     replay.add_argument("--key", required=True, help="New idempotency key for the replay")
     from .lab_cli import add_parser as add_lab_parser
     add_lab_parser(sub)
+    from .service_cli import add_parser as add_service_parser
+    add_service_parser(sub)
     enroll = sub.add_parser("enroll")
     enroll.add_argument("--name", required=True)
     enroll.add_argument("--board-profile", default="generic")
@@ -83,6 +88,10 @@ def main(argv=None):
     mcp.add_argument("--allow-writes", action="store_true")
     args = parser.parse_args(argv)
     try:
+        if args.command == "service":
+            from .service_cli import execute
+            output(execute(args))
+            return
         if args.command == "lab":
             from .lab_cli import execute
             output(execute(args))
@@ -169,6 +178,10 @@ def main(argv=None):
             if args.command == 'workspace':
                 output(client.request('PUT', '/api/workspace', {'demo': args.demo == 'on'}) if args.demo else client.request('GET', '/api/workspace'))
             elif args.command == 'labs': output(client.request('GET', '/api/labs'))
+            elif args.command == 'telemetry':
+                if not 1 <= args.limit <= 720: raise ValueError('History limit must be between 1 and 720')
+                from urllib.parse import quote
+                output(client.request('GET', f'/api/boards/{quote(args.board, safe="")}/telemetry?limit={args.limit}'))
             elif args.command in ("boards", "profiles", "batches", "artifacts", "environments"):
                 output(client.request("GET", "/api/" + ("catalog" if args.command == "profiles" else args.command)))
             elif args.command == 'environment-upload': output(client.upload_environment(args.bundle))

@@ -8,6 +8,8 @@ User=galaxy
 Group=galaxy
 WorkingDirectory=/var/lib/side-galaxy
 Environment="SG_KVM_DOMAIN={{ galaxy_domain | default('') }}"
+Environment="SG_CGROUP_DELEGATED=1"
+Delegate=yes
 ExecStart=/opt/side-galaxy/venv/bin/sg agent --config /var/lib/side-galaxy/agent.json --state-dir /var/lib/side-galaxy/modules
 Restart=on-failure
 RestartSec=5

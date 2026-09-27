@@ -23,6 +23,7 @@ class Plan(Strict):
     arguments: list[str] = Field(default_factory=list, max_length=64)
     environment: dict[str, str] = Field(default_factory=dict, max_length=64)
     bandwidth_percent: int | None = Field(default=None, ge=1, le=100)
+    resource_policy: Literal['auto', 'cgroup'] = 'auto'
 
     @model_validator(mode="after")
     def unique(self):
@@ -77,12 +78,37 @@ class Description(Strict):
     execution_environment: ExecutionEnvironment | None = None
     environment_architectures: list[Literal["aarch64", "x86_64"]] = Field(default_factory=list, max_length=2)
     cleanup_scope: Literal["process-group", "external"] = "external"
+    memory_overhead_mib: int = Field(default=0, ge=0, le=65536)
+    process_tree_execution: bool = False
 
 
 class Heartbeat(Strict):
     description: Description
     reload_ack: int = Field(default=0, ge=0)
     reload_error: str | None = Field(default=None, max_length=256)
+    physical_host_id: str | None = Field(default=None, pattern=r'^[0-9a-f]{64}$')
+    telemetry: 'HostSample | None' = None
+
+
+class CPUReading(Strict):
+    id: int = Field(ge=0, le=1023)
+    percent: float | None = Field(default=None, ge=0, le=100, allow_inf_nan=False)
+    frequency_mhz: float | None = Field(default=None, ge=0, le=100000, allow_inf_nan=False)
+
+
+class HostSample(Strict):
+    sampled_at: float = Field(ge=0, allow_inf_nan=False)
+    source: Literal['linux', 'unavailable']
+    cpu_percent: float | None = Field(default=None, ge=0, le=100, allow_inf_nan=False)
+    cpu_frequency_mhz: float | None = Field(default=None, ge=0, le=100000, allow_inf_nan=False)
+    temperature_celsius: float | None = Field(default=None, ge=-100, le=250, allow_inf_nan=False)
+    memory_total_mib: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    memory_available_mib: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    disk_total_bytes: int | None = Field(default=None, ge=0)
+    disk_available_bytes: int | None = Field(default=None, ge=0)
+    throttled: bool | None = None
+    cgroup_available: bool = False
+    per_cpu: list[CPUReading] = Field(default_factory=list, max_length=1024)
 
 
 class Completion(Strict):

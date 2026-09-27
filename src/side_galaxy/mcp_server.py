@@ -20,6 +20,13 @@ def create_mcp(allow_writes=False):
         return request("GET", "/api/boards")
 
     @server.tool(annotations=read)
+    def get_device_telemetry(board_id: str, limit: int = 60) -> dict:
+        """Read measured samples and shared-host allocations; null values are unavailable, freshness uses received_at."""
+        if type(limit) is not int or not 1 <= limit <= 720: raise ValueError('History limit must be between 1 and 720')
+        from urllib.parse import quote
+        return request('GET', f'/api/boards/{quote(board_id, safe="")}/telemetry?limit={limit}')
+
+    @server.tool(annotations=read)
     def get_workspace() -> dict:
         """Read actual demo activation and local access policy."""
         return request('GET', '/api/workspace')

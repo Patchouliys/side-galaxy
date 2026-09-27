@@ -30,7 +30,7 @@ def describe():
     return {"protocol": 1, "name": "Linux process runtime", "mode": "linux-process",
             "cpus": sorted(os.sched_getaffinity(0)), "reserved_cpus": [0],
             "memory_mib": max(128, mem // 2), "memory_limit_required": True,
-            "cleanup_scope": "process-group", "capabilities": ["cpu-affinity", "memory-limit", "interference", "workload-bundle"],
+            "cleanup_scope": "process-group", "process_tree_execution": True, "capabilities": ["cpu-affinity", "memory-limit", "interference", "workload-bundle"],
             "templates": ["cpu-contention", "memory-copy", "workload"],
             "execution_environment": execution_environment()}
 

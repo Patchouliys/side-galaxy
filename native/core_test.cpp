@@ -313,6 +313,23 @@ int main() {
         require(queue.good("poll", {{"board_id", "beta"}}).at("module_sha256") == std::string(64, 'd'),
                 "Queue dispatch did not pin the latest generation");
 
+        Fixture physical;
+        enroll(physical);
+        for (const auto* id : {"alpha", "beta"})
+            physical.good("heartbeat", {{"board_id", id}, {"heartbeat", {{"description", description()}, {"physical_host_id", std::string(64, 'e')}}}});
+        physical.bad("submit", submission("duplicate-host"), "conflict");
+        std::vector<std::future<Json>> host_futures;
+        for (int i = 0; i < 8; ++i)
+            host_futures.push_back(std::async(std::launch::async, [&physical, i] {
+                return physical.call("submit", submission("host-race-" + std::to_string(i), plan({i % 2 ? "alpha" : "beta"})));
+            }));
+        int host_winners = 0;
+        for (auto& future : host_futures) host_winners += future.get().at("ok").get<bool>();
+        require(host_winners == 1, "Concurrent aliases acquired multiple leases on one physical host");
+        const auto host_boards = physical.good("boards");
+        require(host_boards[0].at("host_active_run") == host_boards[1].at("host_active_run")
+                && !host_boards[0].at("host_active_run").is_null(), "Sibling views disagree about physical allocation");
+
         Fixture legacy;
         legacy.sql("CREATE TABLE boards (id TEXT PRIMARY KEY,name TEXT NOT NULL,board_profile TEXT NOT NULL,"
                    "system_profile TEXT NOT NULL,token_hash TEXT NOT NULL,description TEXT,seen REAL NOT NULL DEFAULT 0,"

@@ -134,10 +134,14 @@ void schema(Database& db) {
                "seen REAL NOT NULL DEFAULT 0,quarantined INTEGER NOT NULL DEFAULT 0,"
                "reload_requested INTEGER NOT NULL DEFAULT 0,reload_ack INTEGER NOT NULL DEFAULT 0,"
                "reload_error TEXT,local INTEGER NOT NULL DEFAULT 0)");
-    bool maintenance_column = false;
-    for (const auto& column : db.query("PRAGMA table_info(boards)"))
+    bool maintenance_column = false, physical_host_column = false;
+    for (const auto& column : db.query("PRAGMA table_info(boards)")) {
         maintenance_column |= column.at("name") == "maintenance";
+        physical_host_column |= column.at("name") == "physical_host_id";
+    }
     if (!maintenance_column) db.execute("ALTER TABLE boards ADD COLUMN maintenance TEXT");
+    if (!physical_host_column) db.execute("ALTER TABLE boards ADD COLUMN physical_host_id TEXT");
+    db.execute("CREATE INDEX IF NOT EXISTS board_physical_host ON boards(physical_host_id)");
     db.execute("CREATE TABLE IF NOT EXISTS workspace_settings (id INTEGER PRIMARY KEY CHECK(id=1),demo INTEGER NOT NULL)");
     db.execute("CREATE TABLE IF NOT EXISTS batches (id TEXT PRIMARY KEY,key TEXT UNIQUE NOT NULL,"
                "plan TEXT NOT NULL,sha256 TEXT NOT NULL,created REAL NOT NULL)");
@@ -150,6 +154,13 @@ void schema(Database& db) {
                "batch_id TEXT NOT NULL REFERENCES batches(id),board_id TEXT NOT NULL REFERENCES boards(id),"
                "state TEXT NOT NULL,created REAL NOT NULL,started REAL,finished REAL,module_sha256 TEXT,result TEXT)");
     db.execute("CREATE UNIQUE INDEX IF NOT EXISTS board_lease ON runs(board_id) "
+               "WHERE state IN ('queued','running','cancelling')");
+    bool run_host_column = false;
+    for (const auto& column : db.query("PRAGMA table_info(runs)")) run_host_column |= column.at("name") == "physical_host_key";
+    if (!run_host_column) db.execute("ALTER TABLE runs ADD COLUMN physical_host_key TEXT");
+    db.execute("UPDATE runs SET physical_host_key=(SELECT COALESCE('host:'||b.physical_host_id,'board:'||b.id) "
+               "FROM boards b WHERE b.id=runs.board_id) WHERE physical_host_key IS NULL AND state!='waiting' AND module_sha256 IS NOT NULL");
+    db.execute("CREATE UNIQUE INDEX IF NOT EXISTS physical_host_lease ON runs(physical_host_key) "
                "WHERE state IN ('queued','running','cancelling')");
 }
 
@@ -206,6 +217,38 @@ bool reload_pending(const Json& board) {
         || (board.at("reload_requested").get<int>() > 0 && !board.at("reload_error").is_null());
 }
 
+std::string physical_host_key(const Json& board) {
+    return board.at("physical_host_id").is_null() ? "board:" + board.at("id").get<std::string>()
+        : "host:" + board.at("physical_host_id").get<std::string>();
+}
+
+std::vector<Json> host_members(Database& db, const Json& board) {
+    return db.query("SELECT id,quarantined,maintenance,reload_requested,reload_ack,reload_error FROM boards "
+                    "WHERE physical_host_id=? OR id=?", {board.at("physical_host_id"), board.at("id")});
+}
+
+Json host_state(Database& db, const Json& board) {
+    Json state = {{"physical_host_key", physical_host_key(board)},
+                  {"physical_host_identity_known", !board.at("physical_host_id").is_null()},
+                  {"host_quarantined", false}, {"host_maintenance", false}, {"host_reload_pending", false},
+                  {"host_quarantine_sources", Json::array()}, {"host_active_run", nullptr}, {"host_active_board_id", nullptr}};
+    for (const auto& member : host_members(db, board)) {
+        if (member.at("quarantined").get<int>()) {
+            state["host_quarantined"] = true;
+            state["host_quarantine_sources"].push_back(member.at("id"));
+        }
+        if (!member.at("maintenance").is_null()) state["host_maintenance"] = true;
+        if (reload_pending(member)) state["host_reload_pending"] = true;
+    }
+    const auto active = db.one("SELECT id,board_id FROM runs WHERE physical_host_key=? "
+                               "AND state IN ('queued','running','cancelling')", {state.at("physical_host_key")});
+    if (!active.is_null()) {
+        state["host_active_run"] = active.at("id");
+        state["host_active_board_id"] = active.at("board_id");
+    }
+    return state;
+}
+
 void cancel_board(Database& db, const Json& board_id, const char* reason) {
     db.execute("UPDATE runs SET state='cancelled',finished=?,result=? WHERE board_id=? AND state='queued'",
                {now(), Json{{"error", reason}, {"code_executed", false}, {"cleanup_ok", true}}.dump(), board_id});
@@ -232,6 +275,8 @@ void validate_plan(const Json& plan) {
                 || !unique_cores.insert(core.get<std::int64_t>()).second) invalid("CPU lists must be nonnegative, unique and disjoint");
         }
     }
+    const auto policy = plan.value("resource_policy", std::string("auto"));
+    if (policy != "auto" && policy != "cgroup") invalid("Invalid resource policy");
     const auto mode = string_field(plan, "template", 64);
     if (!plan.value("environment_sha256", Json(nullptr)).is_null()) {
         hash_field(plan, "environment_sha256");
@@ -363,30 +408,31 @@ Json check_plan(Database& db, const Json& payload, bool allow_wait = false) {
     const bool demo = demo_enabled(db);
     Json cores = plan.at("cpus");
     for (const auto& core : plan.at("interference_cpus")) cores.push_back(core);
+    std::set<std::string> physical_hosts;
     for (const auto& board_id : plan.at("boards")) {
-        const auto board = db.one("SELECT name,description,seen,quarantined,local,system_profile,maintenance,"
-                                  "reload_requested,reload_ack,reload_error,EXISTS(SELECT 1 FROM runs "
-                                  "WHERE board_id=boards.id AND state IN ('queued','running','cancelling')) AS occupied "
-                                  "FROM boards WHERE id=?", {board_id});
+        const auto board = db.one("SELECT * FROM boards WHERE id=?", {board_id});
         Json reasons = Json::array();
         if (board.is_null()) {
             errors.push_back({{"board_id", board_id}, {"reasons", Json::array({"unknown board"})}});
             continue;
         }
+        const auto host = host_state(db, board);
+        if (!physical_hosts.insert(host.at("physical_host_key").get<std::string>()).second)
+            reasons.push_back("batch selects multiple targets on the same physical host");
         const auto description = parsed(board.at("description"), Json::object());
         if (!demo && synthetic_board(board)) reasons.push_back("demo mode disabled; synthetic admission is blocked");
         if (!allow_wait) {
-            if (!board.at("maintenance").is_null()) reasons.push_back("board restart maintenance is pending");
-            if (reload_pending(board)) reasons.push_back("module reload pending or failed; await a successful acknowledgement");
+            if (host.at("host_maintenance").get<bool>()) reasons.push_back("physical host restart maintenance is pending");
+            if (host.at("host_reload_pending").get<bool>()) reasons.push_back("physical host module reload pending or failed; await a successful acknowledgement");
             if (timestamp - board.at("seen").get<double>() > 30) reasons.push_back("board offline");
-            if (board.at("quarantined").get<int>()) reasons.push_back("board quarantined; verify cleanup before recovery");
-            if (board.at("occupied").get<int>()) reasons.push_back("board lease occupied");
+            if (host.at("host_quarantined").get<bool>()) reasons.push_back("physical host quarantined; verify cleanup before recovery");
+            if (!host.at("host_active_run").is_null()) reasons.push_back("physical host lease occupied");
         }
         // An enrolled, never-connected target has no capabilities to validate yet.
         // It may wait, but admission always requires its first validated description.
         if (allow_wait && description.empty()) {
             if (!reasons.empty()) errors.push_back({{"board_id", board_id}, {"reasons", std::move(reasons)}});
-            targets.push_back({{"board_id", board_id}, {"name", board.at("name")}, {"mode", nullptr}, {"module_sha256", nullptr}});
+            targets.push_back({{"board_id", board_id}, {"name", board.at("name")}, {"mode", nullptr}, {"module_sha256", nullptr}, {"physical_host_key", host.at("physical_host_key")}});
             continue;
         }
         bool unavailable = false, reserved = false;
@@ -407,11 +453,18 @@ Json check_plan(Database& db, const Json& payload, bool allow_wait = false) {
             if (!contains(description.value("environment_architectures", Json::array()), payload.value("environment_architecture", Json(nullptr))))
                 reasons.push_back("environment architecture unsupported by target");
         }
+        if (plan.value("resource_policy", std::string("auto")) == "cgroup" && !contains(caps, "process-tree-limits"))
+            reasons.push_back("process-tree resource limits unsupported");
         if (!contains(caps, "cpu-affinity")) reasons.push_back("CPU affinity unsupported");
         const auto memory = plan.value("memory_mib", Json(nullptr));
+        if (memory.is_null() && plan.value("resource_policy", std::string("auto")) == "cgroup")
+            reasons.push_back("process-tree resource limits require a memory budget");
         if (memory.is_null() && description.value("memory_limit_required", false)) reasons.push_back("module requires a memory limit");
         if (!memory.is_null() && (!contains(caps, "memory-limit") || memory.get<double>() > description.value("memory_mib", 0.0)))
             reasons.push_back("memory limit unsupported or exceeds available budget");
+        if (environment_bundle && !memory.is_null()
+            && memory.get<double>() + description.value("memory_overhead_mib", 0.0) > description.value("memory_mib", 0.0))
+            reasons.push_back("guest memory plus host overhead exceeds available budget");
         if (!plan.value("bandwidth_percent", Json(nullptr)).is_null() && !contains(caps, "bandwidth-limit"))
             reasons.push_back("hardware bandwidth control unsupported");
         if (!plan.at("interference_cpus").empty() && !contains(caps, "interference")) reasons.push_back("module does not support interferers");
@@ -422,7 +475,7 @@ Json check_plan(Database& db, const Json& payload, bool allow_wait = false) {
         }
         if (!reasons.empty()) errors.push_back({{"board_id", board_id}, {"reasons", std::move(reasons)}});
         targets.push_back({{"board_id", board_id}, {"name", board.at("name")}, {"mode", description.value("mode", Json(nullptr))},
-                           {"module_sha256", description.value("module_sha256", Json(nullptr))}});
+                           {"module_sha256", description.value("module_sha256", Json(nullptr))}, {"physical_host_key", host.at("physical_host_key")}});
     }
     return {{"valid", errors.empty()}, {"errors", std::move(errors)}, {"targets", std::move(targets)}, {"plan_sha256", plan_hash}};
 }
@@ -442,8 +495,13 @@ std::string waiting_reason(const Json& checked) {
 }
 
 bool waiting_overlap(Database& db, const Json& plan) {
-    for (const auto& board : plan.at("boards"))
-        if (!db.one("SELECT 1 FROM runs WHERE board_id=? AND state='waiting' LIMIT 1", {board}).is_null()) return true;
+    std::set<std::string> hosts;
+    for (const auto& id : plan.at("boards")) {
+        const auto board = db.one("SELECT id,physical_host_id FROM boards WHERE id=?", {id});
+        if (!board.is_null()) hosts.insert(physical_host_key(board));
+    }
+    for (const auto& board : db.query("SELECT DISTINCT b.id,b.physical_host_id FROM runs r JOIN boards b ON b.id=r.board_id WHERE r.state='waiting'"))
+        if (hosts.contains(physical_host_key(board))) return true;
     return false;
 }
 
@@ -453,7 +511,6 @@ void dispatch_waiting(Database& db) {
     for (const auto& batch : db.query("SELECT b.id,b.admission_contract FROM batches b "
                                      "WHERE EXISTS(SELECT 1 FROM runs r WHERE r.batch_id=b.id AND r.state='waiting') ORDER BY b.rowid")) {
         const auto contract = parsed(batch.at("admission_contract"));
-        const auto& boards = contract.at("plan").at("boards");
         const auto compatible = check_plan(db, contract, true);
         if (!compatible.at("valid").get<bool>()) {
             db.execute("UPDATE runs SET state='failed',finished=?,result=? WHERE batch_id=? AND state='waiting'",
@@ -462,17 +519,17 @@ void dispatch_waiting(Database& db) {
             continue;
         }
         bool earlier = false;
-        for (const auto& board : boards) earlier |= blocked.contains(board.get<std::string>());
+        for (const auto& target : compatible.at("targets")) earlier |= blocked.contains(target.at("physical_host_key").get<std::string>());
         const auto checked = check_plan(db, contract);
         if (earlier || !checked.at("valid").get<bool>()) {
-            for (const auto& board : boards) blocked.insert(board.get<std::string>());
+            for (const auto& target : compatible.at("targets")) blocked.insert(target.at("physical_host_key").get<std::string>());
             db.execute("UPDATE batches SET waiting_reason=? WHERE id=?",
-                       {earlier ? "Earlier waiting batch shares a target" : waiting_reason(checked), batch.at("id")});
+                       {earlier ? "Earlier waiting batch shares a physical host" : waiting_reason(checked), batch.at("id")});
             continue;
         }
         for (const auto& target : checked.at("targets"))
-            db.execute("UPDATE runs SET state='queued',module_sha256=? WHERE batch_id=? AND board_id=? AND state='waiting'",
-                       {target.at("module_sha256"), batch.at("id"), target.at("board_id")});
+            db.execute("UPDATE runs SET state='queued',module_sha256=?,physical_host_key=? WHERE batch_id=? AND board_id=? AND state='waiting'",
+                       {target.at("module_sha256"), target.at("physical_host_key"), batch.at("id"), target.at("board_id")});
         db.execute("UPDATE batches SET waiting_reason=NULL WHERE id=?", {batch.at("id")});
     }
 }
@@ -509,9 +566,22 @@ Json dispatch(Database& db, const std::string& operation, const Json& payload) {
         const auto& description = heartbeat.at("description");
         if (!description.is_object()) invalid("Invalid module description");
         hash_field(description, "module_sha256");
+        const auto board = db.one("SELECT * FROM boards WHERE id=?", {id});
+        if (board.is_null()) missing();
+        // An older agent may omit identity, but cannot erase an established host binding.
+        if (!heartbeat.value("physical_host_id", Json(nullptr)).is_null()) {
+            const auto identity = hash_field(heartbeat, "physical_host_id");
+            if (board.at("physical_host_id") != identity) {
+                const auto host = host_state(db, board);
+                if (!host.at("host_active_run").is_null() || host.at("host_quarantined").get<bool>()
+                    || host.at("host_maintenance").get<bool>() || host.at("host_reload_pending").get<bool>())
+                    conflict("Physical host identity cannot change while the old host has active or uncertain state");
+                db.execute("UPDATE boards SET physical_host_id=? WHERE id=?", {identity, id});
+            }
+        }
         db.execute("UPDATE boards SET description=?,seen=?,reload_ack=MIN(?,reload_requested),reload_error=? WHERE id=?",
                    {description.dump(), now(), heartbeat.value("reload_ack", 0), heartbeat.value("reload_error", Json(nullptr)), id});
-        auto result = db.one("SELECT reload_requested,quarantined FROM boards WHERE id=?", {id});
+        auto result = db.one("SELECT reload_requested,quarantined,physical_host_id FROM boards WHERE id=?", {id});
         if (result.is_null()) missing();
         expire(db);
         dispatch_waiting(db);
@@ -525,12 +595,13 @@ Json dispatch(Database& db, const std::string& operation, const Json& payload) {
         for (auto board : db.query("SELECT b.*,r.id AS active_run FROM boards b LEFT JOIN runs r ON b.id=r.board_id "
                                    "AND r.state IN ('queued','running','cancelling') ORDER BY b.name")) {
             board.erase("token_hash");
+            board.update(host_state(db, board));
             board["description"] = parsed(board.at("description"));
             board["maintenance"] = parsed(board.at("maintenance"));
-            board["status"] = !board.at("maintenance").is_null() ? "maintenance"
-                : board.at("quarantined").get<int>() ? "quarantined"
+            board["status"] = board.at("host_maintenance").get<bool>() ? "maintenance"
+                : board.at("host_quarantined").get<bool>() ? "quarantined"
                 : timestamp - board.at("seen").get<double>() > 30 ? "offline"
-                : !board.at("active_run").is_null() ? "busy" : reload_pending(board) ? "reloading" : "ready";
+                : !board.at("host_active_run").is_null() ? "busy" : board.at("host_reload_pending").get<bool>() ? "reloading" : "ready";
             result.push_back(std::move(board));
         }
         return result;
@@ -543,11 +614,11 @@ Json dispatch(Database& db, const std::string& operation, const Json& payload) {
         const bool overlap = waiting_overlap(db, payload.at("plan"));
         const auto ready = check_plan(db, payload);
         checked["queueable"] = enqueue && checked.at("valid").get<bool>();
-        checked["waiting_reason"] = overlap ? Json("Earlier waiting batch shares a target")
+        checked["waiting_reason"] = overlap ? Json("Earlier waiting batch shares a physical host")
             : ready.at("valid").get<bool>() ? Json(nullptr) : Json(waiting_reason(ready));
         if (!enqueue && overlap) {
             checked["valid"] = false;
-            checked["errors"].push_back({{"board_id", nullptr}, {"reasons", {"Earlier waiting batch shares a target"}}});
+            checked["errors"].push_back({{"board_id", nullptr}, {"reasons", {"Earlier waiting batch shares a physical host"}}});
         }
         return checked;
     }
@@ -565,7 +636,7 @@ Json dispatch(Database& db, const std::string& operation, const Json& payload) {
         }
         const auto checked = check_plan(db, payload, enqueue);
         if (!checked.at("valid").get<bool>()) conflict(checked.dump());
-        if (!enqueue && waiting_overlap(db, payload.at("plan"))) conflict("Earlier waiting batch shares a target");
+        if (!enqueue && waiting_overlap(db, payload.at("plan"))) conflict("Earlier waiting batch shares a physical host");
         if (enqueue && db.one("SELECT COUNT(DISTINCT batch_id) AS count FROM runs WHERE state='waiting'").at("count").get<int>() >= 256)
             conflict("Waiting queue is full (256 batches)");
         const auto id = string_field(payload, "batch_id");
@@ -583,9 +654,10 @@ Json dispatch(Database& db, const std::string& operation, const Json& payload) {
         db.execute("INSERT INTO batches(id,key,plan,sha256,created,enqueue,admission_contract) VALUES(?,?,?,?,?,?,?)",
                    {id, key, payload.at("plan").dump(), plan_hash, timestamp, enqueue, contract.dump()});
         for (std::size_t index = 0; index < targets.size(); ++index)
-            db.execute("INSERT INTO runs(id,batch_id,board_id,state,created,module_sha256) VALUES(?,?,?,?,?,?)",
+            db.execute("INSERT INTO runs(id,batch_id,board_id,state,created,module_sha256,physical_host_key) VALUES(?,?,?,?,?,?,?)",
                        {runs[index], id, targets[index].at("board_id"), enqueue ? "waiting" : "queued", timestamp,
-                        enqueue ? Json(nullptr) : targets[index].at("module_sha256")});
+                        enqueue ? Json(nullptr) : targets[index].at("module_sha256"),
+                        enqueue ? Json(nullptr) : targets[index].at("physical_host_key")});
         if (enqueue) dispatch_waiting(db);
         return batch_view(db, id);
     }
@@ -620,7 +692,8 @@ Json dispatch(Database& db, const std::string& operation, const Json& payload) {
             row = db.one("SELECT * FROM runs WHERE board_id=? AND state IN ('running','cancelling')", {id});
             if (row.is_null()) return nullptr;
         }
-        if ((board.at("quarantined").get<int>() || !board.at("maintenance").is_null()) && row.at("state") != "cancelling") return nullptr;
+        const auto host = host_state(db, board);
+        if ((host.at("host_quarantined").get<bool>() || host.at("host_maintenance").get<bool>()) && row.at("state") != "cancelling") return nullptr;
         const bool claimed = row.at("state") == "queued";
         if (claimed) {
             const auto description = parsed(board.at("description"), Json::object());
@@ -688,14 +761,20 @@ Json dispatch(Database& db, const std::string& operation, const Json& payload) {
         if (board.is_null()) missing();
         if (action == "reload" || action == "force-reload") {
             db.execute("UPDATE boards SET reload_requested=reload_requested+1,reload_error=NULL WHERE id=?", {id});
-            if (action == "force-reload") cancel_board(db, id, "Forced module reload");
+            if (action == "force-reload")
+                for (const auto& member : host_members(db, board)) cancel_board(db, member.at("id"), "Forced physical host module reload");
         }
         else if (action == "recover") {
-            if (!board.at("maintenance").is_null()) conflict("Restart maintenance must complete before recovery");
-            if (!db.one("SELECT 1 FROM runs WHERE board_id=? AND state IN ('queued','running','cancelling')", {id}).is_null())
-                conflict("Active run must be stopped before recovery");
+            const auto host = host_state(db, board);
+            if (host.at("host_maintenance").get<bool>()) conflict("Restart maintenance must complete before recovery");
+            if (!host.at("host_active_run").is_null()) conflict("Physical host active run must be stopped before recovery");
             db.execute("UPDATE boards SET quarantined=0 WHERE id=?", {id});
         } else if (action == "restart") {
+            const auto host = host_state(db, board);
+            if (!host.at("host_active_board_id").is_null() && host.at("host_active_board_id") != id)
+                conflict("Sibling target has an active run; guest restart cannot prove its cleanup");
+            if (host.at("host_maintenance").get<bool>() && board.at("maintenance").is_null())
+                conflict("Physical host restart maintenance is already pending");
             auto maintenance = parsed(board.at("maintenance"));
             if (maintenance.is_null()) {
                 const auto description = parsed(board.at("description"), Json::object());

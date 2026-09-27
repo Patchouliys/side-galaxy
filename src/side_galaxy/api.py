@@ -44,6 +44,8 @@ def create_app(db_path=".data/galaxy.db", demo=False, token=None, read_token=Non
     store = Store(db_path)
     from .run_logs import RunLogs
     logs = RunLogs(store)
+    from .telemetry import Telemetry
+    telemetry = Telemetry(store)
     workspace = Workspace(store, demo)
     managed_dirs = [Path(p).resolve() for p in (lab_dirs if lab_dirs is not None else [Path(db_path).parent / 'lab'])]
     restart_tasks, restart_operations = {}, {}
@@ -77,6 +79,7 @@ def create_app(db_path=".data/galaxy.db", demo=False, token=None, read_token=Non
 
     app = FastAPI(title="Side Galaxy", version="0.1.0", lifespan=lifespan)
     app.state.store = store
+    app.state.telemetry = telemetry
     app.state.workspace = workspace
 
     @app.middleware("http")
@@ -231,6 +234,10 @@ def create_app(db_path=".data/galaxy.db", demo=False, token=None, read_token=Non
     @app.get("/api/boards", dependencies=[Depends(reader)])
     def boards(): return workspace.boards()
 
+    @app.get('/api/boards/{board_id}/telemetry', dependencies=[Depends(reader)])
+    def device_telemetry(board_id: str, limit: int = Query(default=60, ge=1, le=720)):
+        return telemetry.read(board_id, limit)
+
     @app.post("/api/boards", dependencies=[Depends(writer)], status_code=201)
     def enroll(data: Enrollment): return store.enroll(data)
 
@@ -270,7 +277,11 @@ def create_app(db_path=".data/galaxy.db", demo=False, token=None, read_token=Non
     def cancel(batch_id: str): return store.cancel(batch_id)
 
     @app.post("/api/agent/{board_id}/heartbeat", dependencies=[Depends(board_auth)])
-    def heartbeat(board_id: str, data: Heartbeat): return store.heartbeat(board_id, data)
+    def heartbeat(board_id: str, data: Heartbeat):
+        with store._lock:
+            result = store.heartbeat(board_id, data)
+            telemetry.append(board_id, data.telemetry)
+        return result
 
     @app.post("/api/agent/{board_id}/poll", dependencies=[Depends(board_auth)])
     def poll(board_id: str): return store.poll(board_id)

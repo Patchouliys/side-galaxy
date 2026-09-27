@@ -56,7 +56,8 @@ def describe():
     memory = os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES') // 1024**2
     return {'protocol': 1, 'name': 'Offline QEMU environments', 'mode': 'qemu-' + accel,
             'cpus': cpus, 'reserved_cpus': [0], 'memory_mib': max(128, memory - 512),
-            'memory_limit_required': True, 'environment_required': True, 'capabilities': ['workload-bundle', 'environment-bundle', 'guest-agent', 'memory-limit'] +
+            'memory_limit_required': True, 'environment_required': True,
+            'process_tree_execution': True, 'memory_overhead_mib': 256, 'capabilities': ['workload-bundle', 'environment-bundle', 'guest-agent', 'memory-limit'] +
             (['cpu-affinity'] if hasattr(os, 'sched_setaffinity') else []),
             'templates': ['workload'], 'execution_environment': None, 'environment_architectures': [arch], 'cleanup_scope': 'external'}
 

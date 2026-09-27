@@ -49,6 +49,8 @@ uv run sg lab up
 uv run sg batches
 ```
 
+For automatic local startup/restart, use `sg service install controller --db .data/galaxy.db` when the controller port is free, then inspect `sg service status`. Foreground `sg serve` remains available. Service installation preserves `SG_PROFILES_DIR` and accepts repeated `--lab-state-dir` options for custom profiles and QEMU labs; see [operations](docs/operations.md#supervised-local-services).
+
 ## Develop without hardware
 
 Start the control server, then run `uv run sg lab up` in another terminal. The local QEMU lab boots ARM64 Linux, builds the native core inside the guest, and registers a target that actually compiles and runs uploaded experiments. See the [local lab guide](docs/local-lab.md) for prerequisites and options.
@@ -57,13 +59,19 @@ Select another target to reuse the same artifact and parameters, or run `sg repl
 
 ## Experiment controls
 
-Use `sg preflight plan.json --enqueue` and `sg submit plan.json --enqueue --key experiment-001` to wait for busy targets. Each execution target runs one experiment at a time; independent targets run in parallel. A waiting batch holds no resources and receives all required leases atomically after fresh checks. The console enables queuing by default. `waiting` means awaiting resources; `queued` means admitted and awaiting the agent. Queue position is not an ETA.
+Use `sg preflight plan.json --enqueue` and `sg submit plan.json --enqueue --key experiment-001` to wait for busy targets. Execution targets on the same physical host share one experiment lease; independent hosts run in parallel. A waiting batch holds no resources and receives all required leases atomically after fresh checks. The console enables queuing by default. `waiting` means awaiting resources; `queued` means admitted and awaiting the agent. Queue position is not an ETA.
 
 Follow a run with `sg logs RUN_ID --follow`; press Ctrl+C to stop reading. Live output is bounded and reports truncation. Final stdout/stderr and results remain independent of live delivery.
 
 Use `sg reload BOARD_ID` to reload after current work, or `sg reload BOARD_ID --force` to interrupt it first. The console exposes both actions with progress and failure feedback. Managed QEMU guests also support `sg lab restart` and `sg lab restart --force`; watch completion with `sg labs`. Restart preserves the disk and device identity.
 
 The demo switch starts/stops sample agents and hides synthetic-only inventory/history without deleting records. It is also available as `sg workspace --demo on|off`; `sg serve --demo` explicitly starts with samples enabled.
+
+## Device monitoring and resource controls
+
+The console's **Device monitoring** view shows measured CPU use/frequency, temperature, memory, disk, per-core readings and current allocations. The same data is available through `sg telemetry BOARD_ID --limit 60` and MCP `get_device_telemetry`. Missing sensors remain unavailable; freshness uses server receipt time. The view polls bounded history only while visible and shows which execution targets share a physical host.
+
+Set plan `resource_policy` to `auto` to use available controls, or `cgroup` to require delegated process-tree limits. Preflight checks reported capabilities; results retain actual enforcement and cleanup evidence. Guest memory and declared host overhead are budgeted separately. Board and OS support remains modular through profiles and trusted execution modules.
 
 ## Bring your experiment
 
@@ -104,7 +112,9 @@ Select the environment in the console or set its digest as `environment_sha256` 
 
 ## Connect AI tools
 
-Configure a compatible MCP client to run `sg mcp`, with `SG_SERVER` and `SG_TOKEN` in its environment. Queries and preflight are available by default, including `list_environments` and `get_run_logs`. Use `sg mcp --allow-writes` with an operator token to upload experiment or environment packages, submit experiments with `run_experiment(..., enqueue=true)`, cancel batches, or reload modules.
+Configure a compatible MCP client to run `sg mcp`, with `SG_SERVER` and `SG_TOKEN` in its environment. Queries and preflight are available by default, including `list_environments`, `get_run_logs`, and `get_device_telemetry`. Use `sg mcp --allow-writes` with an operator token to upload experiment or environment packages, submit experiments with `run_experiment(..., enqueue=true)`, cancel batches, or reload modules.
+
+Use the bundled [Side Galaxy operator skill](.agents/skills/side-galaxy-operator/SKILL.md) for capability discovery, package preparation, idempotent execution, monitoring and output retrieval through CLI/MCP.
 
 ## Documentation
 

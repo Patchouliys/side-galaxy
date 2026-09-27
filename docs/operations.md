@@ -29,7 +29,7 @@ uv run sg batch BATCH_ID
 uv run sg cancel BATCH_ID
 ```
 
-Reuse the key when retrying the same submission; choose a new key for a new experiment. Preflight does not reserve boards, and submission repeats checks atomically. Each board has one experiment lease. Built-in experiments support victim/interferer roles internally; custom bundles organize their own workloads. Synchronized starts across boards are not guaranteed. The batch list shows the most recent 100 batches; older records remain accessible by ID.
+Reuse the key when retrying the same submission; choose a new key for a new experiment. Preflight does not reserve boards, and submission repeats checks atomically. Each physical host has one experiment lease across its registered execution targets. Built-in experiments support victim/interferer roles internally; custom bundles organize their own workloads. Synchronized starts across boards are not guaranteed. The batch list shows the most recent 100 batches; older records remain accessible by ID.
 
 ## Waiting Queues and Running Output
 
@@ -42,9 +42,19 @@ uv run sg batch BATCH_ID
 uv run sg logs RUN_ID --follow
 ```
 
-Each execution target runs one experiment at a time; independent targets can run in parallel. The native scheduler admits all targets in a batch atomically, checks their current capabilities and module versions again, and preserves FIFO order for overlapping targets. Disjoint batches can proceed independently. A `waiting` run owns no lease; a `queued` run has been admitted and is waiting for its agent to start it. Queue position is ordering information, not a time estimate. Cancelling a waiting batch prevents execution; cancelling admitted work waits for cleanup evidence. Preserve both the plan and the enqueue choice when retrying an idempotency key.
+Each physical host runs one experiment at a time across its execution targets; independent hosts can run in parallel. The native scheduler admits all targets in a batch atomically, checks their current capabilities and module versions again, and preserves FIFO order for overlapping hosts. Disjoint batches can proceed independently. A `waiting` run owns no lease; a `queued` run has been admitted and is waiting for its agent to start it. Queue position is ordering information, not a time estimate. Cancelling a waiting batch prevents execution; cancelling admitted work waits for cleanup evidence. Preserve both the plan and the enqueue choice when retrying an idempotency key.
 
 `sg logs RUN_ID` returns bounded events and a `next_sequence` cursor. Resume with `--after CURSOR`, or use `--follow` and press Ctrl+C to stop reading. The console follows the selected run automatically while it executes. Program output buffering can delay visible text. Retained output is limited to 512 KiB and 4,096 events per run; truncation is reported explicitly. Final stdout/stderr and results are stored independently, so log delivery never gates experiment completion or cleanup. Final evidence records whether live delivery was still pending or had been truncated.
+
+## Device Monitoring and Physical Resources
+
+Open **Device monitoring** in the console, run `sg telemetry BOARD_ID --limit 60`, or call MCP `get_device_telemetry(board_id, limit=60)`. The reader-authorized endpoint is `GET /api/boards/{board_id}/telemetry?limit=60`. It returns the latest sample, history in receipt order, the physical host identity, and active allocations across sibling targets. Read limits range from 1 to 720 samples. Storage retains at most 720 samples per target, discards repeated sample timestamps, and limits ingestion to one sample per four seconds; agents normally sample every five seconds. The console requests at most 60 points every five seconds while its monitoring view is visible.
+
+CPU utilization/frequency, temperature, available memory, disk space, per-core readings, throttling and cgroup availability come from the agent's native host probe. Unsupported measurements are null, not zero. Disk capacity describes the filesystem containing the agent state directory. Freshness uses server `received_at`, not the device clock; samples older than 20 seconds are stale. Allocation CPU sets and memory budgets are configuration, separate from measured usage. A changed physical identity does not relabel historical samples as measurements of the new host.
+
+The control plane groups execution targets by their reported hashed physical host identity. A Linux process target and a VM target on the same machine share admission, maintenance and quarantine gates. The console shows their relationship and counts available cores once per host. Targets without a confirmed identity retain per-target admission and are labeled unknown; names and board profiles do not establish physical separation. Board and OS support remains in profiles/modules, independent of this grouping.
+
+Set plan `resource_policy` to `auto` to use available controls and retain their actual enforcement evidence. Set it to `cgroup` to require delegated process-tree controls; preflight rejects targets without `process-tree-limits`. Delegation must be configured by the administrator. For prepared guests, budget `memory_mib` for guest RAM plus the module's `memory_overhead_mib` for host execution overhead. The console shows both. Inspect the final result's resource-control and cleanup evidence before claiming that limits were enforced or a resource scope was cleared. A sibling's unconfirmed cleanup keeps the physical host unavailable until verified recovery.
 
 ## Single Server
 
@@ -59,6 +69,19 @@ Keep tokens in restricted local secret storage, not in commits, command-line arg
 Alternatively, set the same environment variables and run `docker compose up --build -d`; the service is exposed only on localhost. The Dockerfile excludes development directories, credentials, and local data. Dependencies are exported from `uv.lock` and verified by hash. The image build stage compiles the C++ core; the runtime stage installs the native library and SQLite / C++ runtimes. The container does not perform hardware KVM operations; board agents run on Linux hosts. Running containers requires a Docker engine.
 
 API documentation is at the server's `/docs`. API endpoints include `/api/catalog`, `boards`, `preflight`, and `batches`. POST `/api/batches` requires `Idempotency-Key`. Automatic demo agents apply only to sample boards; ordinary registration still requires per-board credentials.
+
+## Supervised Local Services
+
+`sg serve` can remain a foreground process. For automatic startup and restart, install a local controller service while its port is free and experiments are idle:
+
+```sh
+sg service install controller --db .data/galaxy.db --port 7980
+sg service status
+```
+
+The service uses macOS launchd or Linux user systemd, binds only to loopback, and captures `SG_TOKEN`, `SG_READ_TOKEN`, and `SG_PROFILES_DIR` from the installation environment into private configuration. Pass `--lab-state-dir DIRECTORY` repeatedly to preserve custom managed-QEMU roots, just as with `sg serve`; otherwise the default lab root is used. Profile directories continue to hold modular board and system descriptions.
+
+An optional tunnel service uses an existing private SSH configuration and host alias. `sg service install tunnel --ssh-config .data/ssh_config --ssh-host experiment-host --local-port 7980 --remote-port 17980` forwards the remote loopback port to the paired controller. Its local port must match the installed controller's port, so lifecycle checks guard the same controller it forwards. Status reports service registration, process state and controller reachability without returning paths, credentials or SSH identities. Service stop, restart and uninstall reject active experiments; these controls are local CLI operations, not HTTP or MCP host-shell actions.
 
 ## Registration and Multi-Board Deployment
 
@@ -118,6 +141,8 @@ Each environment run boots a new writable overlay over the cached immutable base
 Linux process experiments use the `linux-process` system profile, with process affinity and RLIMIT_AS resource limits. Built-in microbenchmarks divide the memory budget among workers, with at least 64 MiB per worker. `workload` bundles use a per-process address-space limit, with `memory_mib` of at least 128. Python runtimes may need a larger budget. See [Linux / KVM execution](kvm-workloads.md) for precise semantics.
 
 ## MCP
+
+The repository includes the [Side Galaxy operator skill](../.agents/skills/side-galaxy-operator/SKILL.md), with a focused [CLI/MCP reference](../.agents/skills/side-galaxy-operator/references/cli-mcp.md). It guides AI through discovery, package selection, preflight, stable-key submission, monitoring and result collection while preserving the task's authorization. It does not automatically recover quarantined devices or install trusted host modules.
 
 Configure any compatible MCP stdio client, with command pointing to the installed `sg`:
 

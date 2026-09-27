@@ -49,6 +49,8 @@ uv run sg lab up
 uv run sg batches
 ```
 
+需要本地服务自动启动和重启时，在控制器端口空闲的情况下运行 `sg service install controller --db .data/galaxy.db`，再用 `sg service status` 查看状态；仍可使用前台 `sg serve`。服务安装会保留 `SG_PROFILES_DIR`，并支持重复指定 `--lab-state-dir`，继续使用自定义配置和 QEMU 实验环境，详见[运行指南](docs/operations.md#supervised-local-services)。
+
 ## 没有开发板也能开发
 
 启动控制服务后，在另一个终端运行 `uv run sg lab up`。本地 QEMU 环境会启动 ARM64 Linux，在 guest 内构建原生核心并注册设备，真正编译、运行上传的实验。依赖和配置见[本地实验指南](docs/local-lab.md)。
@@ -57,13 +59,19 @@ uv run sg batches
 
 ## 实验控制
 
-使用 `sg preflight plan.json --enqueue` 和 `sg submit plan.json --enqueue --key experiment-001` 等待忙碌目标。每个执行目标同时运行一个实验，不同目标可并行执行。等待中的批次不占用资源，通过重新检查后一次性获得全部所需租约。控制台默认开启排队；`waiting` 表示等待资源，`queued` 表示已分配资源、等待代理启动。队列位置不是预计等待时间。
+使用 `sg preflight plan.json --enqueue` 和 `sg submit plan.json --enqueue --key experiment-001` 等待忙碌目标。同一物理宿主上的执行目标共享一个实验租约，不同宿主可并行执行。等待中的批次不占用资源，通过重新检查后一次性获得全部所需租约。控制台默认开启排队；`waiting` 表示等待资源，`queued` 表示已分配资源、等待代理启动。队列位置不是预计等待时间。
 
 使用 `sg logs RUN_ID --follow` 跟踪运行中输出，按 Ctrl+C 停止查看。实时日志限制保留量，并明确提示截断；最终 stdout/stderr 和结果独立于实时传输保存。
 
 `sg reload BOARD_ID` 在当前实验结束后重载；`sg reload BOARD_ID --force` 会先中断实验再重载。控制台提供对应操作与进度、错误反馈。受管 QEMU 支持 `sg lab restart` 和 `sg lab restart --force`，通过 `sg labs` 查看完成状态；重启保留磁盘与设备身份。
 
 演示开关会启动或停止示例代理，隐藏模拟设备及纯模拟历史，不删除记录。CLI 使用 `sg workspace --demo on|off`；`sg serve --demo` 可明确指定以演示模式启动。
+
+## 设备监控与资源控制
+
+控制台的“设备监控”展示实测 CPU 使用率与频率、温度、内存、磁盘、各核读数和当前资源分配，也可通过 `sg telemetry BOARD_ID --limit 60` 或 MCP `get_device_telemetry` 获取。缺失传感器显示为不可用，采样新鲜度按服务器接收时间判断。监控页只在可见时轮询有上限的历史，并显示执行目标之间的物理宿主关系。
+
+计划中的 `resource_policy` 设为 `auto` 时使用可用控制，设为 `cgroup` 时要求已委派的进程组限额。预检检查目标上报能力，结果保留实际生效控制和清理证据。虚拟机内存与模块声明的宿主开销分别计入预算。板型与系统支持继续通过配置和可信执行模块扩展。
 
 ## 使用自己的实验
 
@@ -104,7 +112,9 @@ uv run sg environments
 
 ## AI 接入
 
-在兼容 MCP 的客户端中设置运行命令 `sg mcp`，通过环境变量提供 `SG_SERVER` 和 `SG_TOKEN`。默认提供查询与预检，包括 `list_environments` 和 `get_run_logs`。使用 `sg mcp --allow-writes` 和 operator token，可上传实验包或环境包、通过 `run_experiment(..., enqueue=true)` 提交实验、取消批次或重载模块。
+在兼容 MCP 的客户端中设置运行命令 `sg mcp`，通过环境变量提供 `SG_SERVER` 和 `SG_TOKEN`。默认提供查询与预检，包括 `list_environments`、`get_run_logs` 和 `get_device_telemetry`。使用 `sg mcp --allow-writes` 和 operator token，可上传实验包或环境包、通过 `run_experiment(..., enqueue=true)` 提交实验、取消批次或重载模块。
+
+可使用随项目提供的 [Side Galaxy operator 技能](.agents/skills/side-galaxy-operator/SKILL.md)，通过 CLI / MCP 完成能力发现、包准备、幂等执行、监控和结果获取。
 
 ## 文档
 

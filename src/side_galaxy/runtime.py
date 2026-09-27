@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 import hashlib
 import json
 import os
@@ -11,6 +12,8 @@ import time
 import threading
 
 from .models import Completion, Description, Heartbeat
+from .agent_state import AgentJournal
+from .host import HostMonitor
 from .profiles import profile
 
 
@@ -75,8 +78,12 @@ class Modules:
 
 
 class Execution:
-    def __init__(self, snapshot, job, artifact_path=None, environment_path=None):
+    def __init__(self, snapshot, job, artifact_path=None, environment_path=None, journal=None, spawn_guard=None, finish_guard=None):
         self.job = job
+        self.completion = None
+        self.resource_scope = None
+        self.finish_guard = finish_guard
+        if journal is not None: journal.launching()
         self.output = tempfile.TemporaryFile()
         self.event_fd, writer = os.pipe()
         os.set_blocking(self.event_fd, False)
@@ -98,8 +105,33 @@ class Execution:
         if artifact_path:
             context.update(artifact_path=str(Path(artifact_path).resolve()), runner_path=str(snapshot.with_suffix(".runner.py").resolve()))
         if environment_path: context["environment_path"] = str(Path(environment_path).resolve())
-        self.process.stdin.write(json.dumps(context).encode())
-        self.process.stdin.close()
+        try:
+            self.resource_scope = spawn_guard(self.process.pid, job) if spawn_guard is not None else None
+            if self.resource_scope is not None and not isinstance(self.resource_scope, dict):
+                raise ValueError("Invalid resource placement receipt")
+            contained = self.resource_scope is not None and self.resource_scope.get('enforcement') == 'cgroup-v2'
+            if contained and job.get('process_tree_execution') is not True:
+                raise ValueError("Execution module does not declare process-tree containment")
+            if job['plan'].get('resource_policy') == 'cgroup' and not contained:
+                raise ValueError("Explicit resource policy has no cgroup placement receipt")
+            if journal is not None: journal.started(self.process.pid, self.resource_scope)
+            # A restarted agent must have durable identity before this gate permits experiment code.
+            self.process.stdin.write(json.dumps(context).encode())
+            self.process.stdin.close()
+        except BaseException:
+            try:
+                self.process.kill()
+                self.process.wait(timeout=3)
+            finally:
+                # Cleanup failure must not skip descriptor closure or replace the
+                # original launch failure. The agent retains uncertain admission.
+                if self.resource_scope and self.finish_guard:
+                    with suppress(Exception): self.finish_guard(self.resource_scope)
+                with suppress(OSError): self.process.stdin.close()
+                os.close(self.event_fd)
+                self.event_fd = None
+                self.output.close()
+            raise
         self.started = time.monotonic()
         self.stopping = None
         self.cancelled = False
@@ -141,6 +173,7 @@ class Execution:
             except ProcessLookupError: pass
 
     def poll(self):
+        if self.completion is not None: return self.completion
         self.drain_logs()
         workload = self.job["plan"]["template"] == "workload"
         if time.monotonic() - self.started > self.job["plan"]["duration_seconds"] + (240 if self.job["plan"].get("environment_sha256") else 120 if workload else 20):
@@ -179,18 +212,39 @@ class Execution:
         if not workload and self.cancelled and self.job.get("cleanup_scope") == "process-group" and not self.forced and group_gone:
             # These modules change only processes, all of which share the killed process group.
             cleanup = True
+        if self.resource_scope:
+            result["resource_scope"] = self.resource_scope
+            if self.resource_scope.get('enforcement') == 'cgroup-v2':
+                try:
+                    evidence = self.finish_guard(self.resource_scope) if self.finish_guard else None
+                except Exception as exc:
+                    evidence = {'empty': False, 'removed': False, 'error': 'Resource cleanup failed: ' + type(exc).__name__}
+                if not isinstance(evidence, dict):
+                    evidence = {'empty': False, 'removed': False, 'error': 'Resource cleanup evidence unavailable'}
+                result["resource_cleanup"] = evidence
+                cleanup = cleanup and evidence.get('empty') is True and evidence.get('removed') is True
+        result["module_cleanup_ok"] = result.get("cleanup_ok")
+        result["cleanup_ok"] = cleanup
         result["module_group_gone"] = group_gone
         result["mode"] = self.job.get("mode", "unknown")
         result["synthetic"] = self.job.get("mode") == "synthetic"
         state = "cancelled" if self.cancelled else "succeeded" if code == 0 and cleanup and not result.get("error") else "failed"
-        return Completion(state=state, result=result, module_sha256=self.job["module_sha256"], cleanup_ok=cleanup)
+        self.completion = Completion(state=state, result=result, module_sha256=self.job["module_sha256"], cleanup_ok=cleanup)
+        return self.completion
 
 
 class Agent:
-    def __init__(self, client, board_id, modules):
+    def __init__(self, client, board_id, modules, spawn_guard=None, recover_scope=None):
         self.client, self.board_id, self.modules = client, board_id, modules
+        self.journal = AgentJournal(getattr(modules, 'root', Path(modules.current[0]).parent), board_id)
         self.execution = None
-        self.pending = None
+        try:
+            self.host = HostMonitor(getattr(modules, "root", Path(modules.current[0]).parent), enabled=modules.current[1].mode != "synthetic")
+            self.spawn_guard = spawn_guard or self.host.place
+            self._pending = self.journal.reconcile(recover_scope)
+        except BaseException:
+            self.journal.close()
+            raise
         self.staging = None
         self.staging_cancel = threading.Event()
         self.downloads = ThreadPoolExecutor(max_workers=1, thread_name_prefix="artifact")
@@ -199,6 +253,41 @@ class Agent:
         self.log_retry_after = 0
         self.reload_ack = 0
         self.reload_requested = 0
+
+    @property
+    def pending(self):
+        return self._pending
+
+    @pending.setter
+    def pending(self, value):
+        if value is not None:
+            self._pending = value
+            try: self.journal.complete(*value)
+            except OSError:
+                # Keep the consumed execution result in memory. Delivery remains
+                # gated on a durable checkpoint in _finish_pending, retried by tick.
+                pass
+        elif self._pending is not None:
+            self.journal.acknowledge()
+        self._pending = value
+
+    def _finish_pending(self):
+        run_id, completion = self.pending
+        record = self.journal.record
+        if not record or record.get('run_id') != run_id or record.get('phase') != 'completion' or record.get('completion') != completion.model_dump():
+            self.journal.complete(run_id, completion)
+        self.client.finish(self.board_id, run_id, completion)
+        self.pending = None
+
+    def _launch(self, snapshot, job, artifact_path=None, environment_path=None):
+        try:
+            self.execution = Execution(snapshot, job, artifact_path, environment_path,
+                                       journal=self.journal, spawn_guard=self.spawn_guard, finish_guard=self.host.finish)
+        except Exception as exc:
+            # Launch failure can follow a partially applied external resource guard.
+            self.pending = (job['id'], Completion(state='failed', result={
+                'error': 'Execution launch failed: ' + type(exc).__name__, 'recovery_required': True},
+                module_sha256=job['module_sha256'], cleanup_ok=False))
 
     def _stage(self, job, cancelled):
         artifact = self.client.fetch_artifact(self.board_id, job['plan']['artifact_sha256'], self.modules.root / 'artifacts')
@@ -263,12 +352,12 @@ class Agent:
             self.modules.reload(force=self.reload_requested > self.reload_ack)
             self.reload_ack = self.reload_requested
         snapshot, desc = self.modules.current
+        desc = self.host.describe(desc)
         status = self.client.heartbeat(self.board_id, Heartbeat(description=desc, reload_ack=self.reload_ack,
-                                                               reload_error=self.modules.error))
+                                                               reload_error=self.modules.error, physical_host_id=self.host.identity, telemetry=self.host.sample()))
         self.reload_requested = status["reload_requested"]
         if self.pending:
-            self.client.finish(self.board_id, self.pending[0], self.pending[1])
-            self.pending = None
+            self._finish_pending()
             return
         job = self.client.poll(self.board_id)
         if self.execution:
@@ -290,9 +379,10 @@ class Agent:
                 self.staging = None
                 try:
                     artifact_path, environment_path = future.result()
-                    self.execution = Execution(staged_snapshot, staged_job, artifact_path, environment_path)
                 except Exception as exc:
                     self.pending = (staged_job["id"], Completion(state="failed", result={"error": "Artifact staging failed: " + type(exc).__name__, "code_executed": False}, module_sha256=staged_job["module_sha256"], cleanup_ok=True))
+                else:
+                    self._launch(staged_snapshot, staged_job, artifact_path, environment_path)
         elif job:
             if not job["claimed"] or job["module_sha256"] != desc.module_sha256:
                 self.pending = (job["id"], Completion(state="failed", result={"error": "Unknown or changed execution; inspect before recovery"},
@@ -300,31 +390,38 @@ class Agent:
             else:
                 job["mode"] = desc.mode
                 job["cleanup_scope"] = desc.cleanup_scope
+                job["process_tree_execution"] = desc.process_tree_execution
+                job["memory_overhead_mib"] = desc.memory_overhead_mib
+                self.journal.claim(job)
                 if job["plan"].get("artifact_sha256"):
                     self.staging_cancel = threading.Event()
                     future = self.downloads.submit(self._stage, job, self.staging_cancel)
                     self.staging = (snapshot, job, future)
                 else:
-                    self.execution = Execution(snapshot, job)
+                    self._launch(snapshot, job)
 
     def shutdown(self):
-        if self.staging:
-            _, job, future = self.staging
-            self.staging_cancel.set()
-            future.cancel()
-            self.pending = (job["id"], Completion(state="cancelled", result={"code_executed": False}, module_sha256=job["module_sha256"], cleanup_ok=True))
-            self.staging = None
-        self.downloads.shutdown(wait=False, cancel_futures=True)
-        if self.execution:
-            self.execution.stop(cancelled=True)
-            while (result := self.execution.poll()) is None: time.sleep(.1)
-            self._close_logs(result)
-            self.pending = (self.execution.job["id"], result)
-            self.execution = None
-        if self.pending:
-            try: self.client.finish(self.board_id, *self.pending)
-            except Exception: pass
-        self.log_uploads.shutdown(wait=False, cancel_futures=True)
+        try:
+            if self.staging:
+                _, job, future = self.staging
+                self.staging_cancel.set()
+                future.cancel()
+                self.pending = (job["id"], Completion(state="cancelled", result={"code_executed": False}, module_sha256=job["module_sha256"], cleanup_ok=True))
+                self.staging = None
+            self.downloads.shutdown(wait=False, cancel_futures=True)
+            if self.execution:
+                self.execution.stop(cancelled=True)
+                while (result := self.execution.poll()) is None: time.sleep(.1)
+                self._close_logs(result)
+                self.pending = (self.execution.job["id"], result)
+                self.execution = None
+            if self.pending:
+                try:
+                    self._finish_pending()
+                except Exception: pass
+            self.log_uploads.shutdown(wait=False, cancel_futures=True)
+        finally:
+            self.journal.close()
 
 
 class LocalClient:

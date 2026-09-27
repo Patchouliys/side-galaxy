@@ -78,6 +78,7 @@ class Store:
         # An omitted optional environment and an explicit null are the same
         # legacy request; adding this field must not invalidate existing keys.
         if identity.get('environment_sha256') is None: identity.pop('environment_sha256', None)
+        if identity.get('resource_policy') == 'auto': identity.pop('resource_policy', None)
         available, requirements = True, {}
         if plan.artifact_sha256:
             try: requirements = self.artifacts.metadata(plan.artifact_sha256)['manifest'].get('requires', {})

@@ -37,6 +37,16 @@ The agent computes and injects `module_sha256`; the plugin does not report it. N
 
 Execution input: `{"op":"run","plan":{...},"run_id":"UUID"}`. Workloads also receive absolute `artifact_path` and `runner_path` values constructed internally by the agent. Output includes `cleanup_ok`, `mode`, `synthetic`, results, and boot IDs before and after execution. KVM output records saved, applied, and restored affinity, plus libvirt statistics. `cleanup_ok:false` or unknown cleanup results quarantine the board. Use `cleanup_scope:process-group` only when all managed resources belong to the child process group. Modules that modify guest, sysfs, cgroup, or peripheral state must use the default `external` scope and restore and report that state themselves.
 
+## Process-tree resource controls
+
+A module may declare `process_tree_execution:true` only when every process used to execute an experiment remains in the module's descendant tree. This is a trusted administrator declaration, separate from `cleanup_scope`: the latter also covers external device or guest state that the module must restore. Linux process execution and managed QEMU environments declare process-tree execution. The libvirt module controls a separately owned VM and does not declare it.
+
+The agent advertises `process-tree-limits` only when that declaration is present and both memory and CPU-set controllers are delegated to its cgroup v2 service. A plan with `resource_policy:"cgroup"` requires this capability and a memory budget. The default `auto` policy uses available controls and reports the actual enforcement mode; it does not claim aggregate VM limits for an external libvirt VM.
+
+Descriptions may declare `memory_overhead_mib` for guest environments. Native admission checks the requested guest RAM plus this host overhead against the module's available memory budget. Managed QEMU declares 256 MiB. The agent copies these values from the pinned local description, creates a per-run cgroup, applies `memory.max` and CPU placement before giving the module its execution request, and includes the scope receipt in its durable journal. Completion requires verified scope emptiness and removal. Missing or failed cleanup evidence retains quarantine even if the module reports success.
+
+The supplied system service uses `Delegate=yes` and `SG_CGROUP_DELEGATED=1`. Administrators must enable unified cgroup v2 and make both `memory` and `cpuset` available through all parent slices. User services may inherit only a subset of controllers; setting the environment variable alone does not grant delegation. Provision unavailable controllers through the operating system's service configuration. The agent does not elevate privileges or modify unrelated cgroups. Reloading a module cannot add missing host delegation.
+
 ## Hot Reload Semantics
 
 1. While idle, the agent reads the source and both manifests, computes their combined SHA-256, and copies the source into a private read-only snapshot.

@@ -20,6 +20,7 @@ extern "C" {
  * Each call opens its own SQLite connection and commits one immediate transaction. */
 SG_CORE_API int sg_core_abi_version(void);
 SG_CORE_API char* sg_core_call(const char* db_path, const char* operation, const char* payload_json);
+SG_CORE_API char* sg_host_call(const char* operation, const char* payload_json);
 SG_CORE_API void sg_core_free(char* result);
 
 #ifdef __cplusplus

@@ -224,6 +224,7 @@ class QueueTests(unittest.TestCase):
         plan = self.plan('alpha')
         legacy_body = plan.model_dump()
         legacy_body.pop('environment_sha256')
+        legacy_body.pop('resource_policy')
         legacy_hash = digest(canonical(legacy_body))
         previous = self.store._call('submit', key='legacy-retry', batch_id='legacy', run_ids=['legacy-run'],
             plan=legacy_body, plan_sha256=legacy_hash, artifact_available=True)
@@ -234,7 +235,11 @@ class QueueTests(unittest.TestCase):
             self.store.submit(plan.model_copy(update={'duration_seconds': 6}), 'legacy-retry')
         environment = plan.model_copy(update={'template': 'workload', 'artifact_sha256': 'a' * 64,
             'environment_sha256': 'b' * 64, 'interference_cpus': []})
-        self.assertEqual(self.store._plan(environment)['plan_sha256'], digest(canonical(environment.model_dump())))
+        environment_body = environment.model_dump()
+        environment_body.pop('resource_policy')
+        self.assertEqual(self.store._plan(environment)['plan_sha256'], digest(canonical(environment_body)))
+        explicit = environment.model_copy(update={'resource_policy': 'cgroup'})
+        self.assertEqual(self.store._plan(explicit)['plan_sha256'], digest(canonical(explicit.model_dump())))
         with self.assertRaises(Conflict): self.store.submit(environment, 'legacy-retry')
 
 
