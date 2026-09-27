@@ -91,6 +91,8 @@ uv run sg artifact-upload .data/hello-workload.zip
 
 ## 文档
 
+详细文档使用英文编写。
+
 - [QEMU 本地实验与目标迁移](docs/local-lab.md)
 - [原生核心构建与打包](docs/native-build.md)
 - [运行、部署与 AI 连接](docs/operations.md)

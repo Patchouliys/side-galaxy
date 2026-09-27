@@ -7,11 +7,11 @@ Side Galaxy's control-state engine is a C++20 shared library; Python handles HTT
 Before running `uv sync` or building a wheel, install:
 
 - Python 3.11+ and uv.
-- CMake 3.20+。
+- CMake 3.20+.
 - A compiler and standard library supporting C++20.
 - SQLite headers and link libraries.
 
-Debian / Ubuntu：
+Debian / Ubuntu:
 
 ```sh
 sudo apt-get update
@@ -33,8 +33,8 @@ The build uses the system toolchain and SQLite. The pinned nlohmann/json header 
 
 The Hatch build hook reads `CMakeLists.txt` at the repository root and builds `side_galaxy_core` in Release mode. An editable installation copies the shared library to `src/side_galaxy/_native/`:
 
-- Linux：`libside_galaxy_core.so`
-- macOS：`libside_galaxy_core.dylib`
+- Linux: `libside_galaxy_core.so`
+- macOS: `libside_galaxy_core.dylib`
 
 Build directories and generated shared libraries are ignored by Git. uv cache keys cover CMake files, C++ sources, headers, the build hook, and the compiler environment. Run `uv sync --frozen` after changing native sources to rebuild. To force a rebuild:
 

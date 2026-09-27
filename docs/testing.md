@@ -18,6 +18,7 @@ uv run python -m unittest discover -s tests -v
 npm run spec:validate
 node --check src/side_galaxy/static/app.js
 node --check src/side_galaxy/static/homepage.js
+node scripts/check_homepage_story.cjs
 ```
 
 To select a test file, for example:

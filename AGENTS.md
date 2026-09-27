@@ -2,7 +2,7 @@
 
 - Read README and the relevant active OpenSpec change before substantial work.
 - Use project-local OpenSpec and Ponytail skills; preserve explicit user authorization.
-- Maintain equivalent English and Chinese READMEs. Write OpenSpec documents and code identifiers in English.
+- Maintain equivalent English and Chinese READMEs. Write all docs/ and OpenSpec documents, and code identifiers, in English.
 - Board and OS support belong in profiles/modules. Do not hard-code new model IDs into the control plane.
 - Treat execution modules as trusted administrator-deployed code. Do not expose management-module source upload or host shell endpoints. Operator-authorized experiment bundles may define explicit setup/run argv inside the selected trusted execution environment.
 - Admission must be atomic. Cancellation and expiry must not silently release possibly active resources.

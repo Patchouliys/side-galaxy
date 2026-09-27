@@ -3,7 +3,7 @@ const clamp = value => Math.max(0,Math.min(1,value));
 const mix = (start,end,amount) => start+(end-start)*amount;
 const ease = (start,end,value) => { const t=clamp((value-start)/(end-start)); return t*t*(3-2*t); };
 
-// ponytail: bake nebula detail once; scroll frames only project cached layers and six stars.
+// ponytail: bake nebula detail once; animate only cached textures and six DOM stars.
 function mountGalaxy() {
   const canvas=document.getElementById('galaxy-canvas'), story=document.getElementById('galaxy-story');
   const context=canvas?.getContext('2d',{alpha:true}); if (!context || !story) return;
@@ -20,6 +20,8 @@ function mountGalaxy() {
     paint.fillStyle=gradient;paint.fillRect(0,0,128,128);return sprite;
   });
   function glow(paint,sprite,x,y,rx,ry,alpha=1) { paint.globalAlpha=alpha;paint.drawImage(sprites[sprite],x-rx,y-ry,rx*2,ry*2); }
+  // A softened flat-speed curve gives inner material a faster angular rate.
+  const angularRate=radius=>1/Math.hypot(radius,.32);
   const disk=document.createElement('canvas');disk.width=disk.height=1024;
   const diskRadius=368, diskExtent=512/diskRadius;
   function bakeDisk() {
@@ -47,13 +49,42 @@ function mountGalaxy() {
   bakeDisk();
   const diskProjection=document.createElement('div');diskProjection.className='galaxy-disk';
   diskProjection.appendChild(disk);plane.insertBefore(diskProjection,canvas);
+  // Keep the broad spiral pattern slow; cached dust layers shear at different rates.
+  const dust=[.36,.69,1.02].map((radius,index)=>{
+    const layer=document.createElement('canvas');layer.width=layer.height=1024;
+    const paint=layer.getContext('2d');paint.translate(512,512);
+    for(let knot=0;knot<9;knot++) {
+      const angle=knot*TAU/3+Math.log(radius+.12)*2.85+normal()*.2;
+      const distance=(radius+normal()*.09)*diskRadius;
+      glow(paint,index,Math.cos(angle)*distance,Math.sin(angle)*distance,46,35,.13);
+    }
+    for(let point=0;point<280;point++) {
+      const distance=Math.max(.08,Math.min(1.24,radius+normal()*.13));
+      const angle=point%3*TAU/3+Math.log(distance+.12)*2.85+normal()*.38;
+      paint.globalAlpha=.18+random()*.35;paint.fillStyle=palette[index];
+      const size=.5+random()*1.2;
+      paint.fillRect(Math.cos(angle)*distance*diskRadius,Math.sin(angle)*distance*diskRadius,size,size);
+    }
+    diskProjection.appendChild(layer);return {layer,rate:angularRate(radius)};
+  });
+  const edge=document.createElement('canvas');edge.width=1024;edge.height=128;
+  const edgePaint=edge.getContext('2d');
+  for(let index=0;index<650;index++) {
+    const x=random()*2-1,y=normal()*Math.pow(1-Math.abs(x),.7)*12;
+    edgePaint.globalAlpha=(.2+random()*.5)*(1-Math.abs(x));edgePaint.fillStyle=palette[index%palette.length];
+    const size=.4+random();edgePaint.fillRect(512+x*500,64+y,size,size);
+  }
   const stars=Array.from({length:135},()=>({x:random(),y:random(),size:.4+random()*.8,alpha:.12+random()*.28}));
   const sky=document.createElement('canvas');
-  const devices=[['Pi 4',-2.55,1.23],['Pi 5',-1.10,1.24],['QEMU',.03,1.15],['Linux',.93,1.23],['KVM guest',2.00,1.25],['Custom',2.92,1.18]].map(([name,angle,r],index)=>({name,x:Math.cos(angle)*r,y:Math.sin(angle)*r,color:index%2?'#bca7ee':'#a9e9e0'}));
+  const devices=[['Pi 4',-2.62,.62],['Pi 5',-1.34,.91],['QEMU',-.22,1.16],['Linux',.70,.76],['KVM guest',1.83,1.28],['Custom',2.48,.98]].map(([name,angle,r])=>({name,x:Math.cos(angle)*r,y:Math.sin(angle)*r,labelWidth:0,rate:angularRate(r)}));
   const ambient=document.createElement('div');ambient.className='galaxy-glints';ambient.setAttribute('aria-hidden','true');plane.appendChild(ambient);
   const coreGlint=document.createElement('span');coreGlint.className='core-glint';ambient.appendChild(coreGlint);
-  const glints=devices.map(()=>{const element=document.createElement('span');element.className='star-glint';ambient.appendChild(element);return element;});
-  let width=0,height=0,ratio=1,mobile=false,frame=0,previous=0,visible=true,progress=0,target=0,phase=-1,headerOffset=0,dirty=true;
+  const glints=devices.map(device=>{
+    const element=document.createElement('span');element.className='star-glint';
+    const label=document.createElement('span');label.className='star-label';label.textContent=device.name;
+    element.appendChild(label);ambient.appendChild(element);return element;
+  });
+  let width=0,height=0,ratio=1,mobile=false,frame=0,previous=0,visible=true,progress=0,target=0,phase=-1,headerOffset=0,dirty=true,orbit=0;
   function bakeSky() {
     sky.width=canvas.width;sky.height=canvas.height;
     const paint=sky.getContext('2d');paint.setTransform(ratio,0,0,ratio,0,0);paint.fillStyle='#aabedb';
@@ -61,16 +92,14 @@ function mountGalaxy() {
   }
   function geometry(value) {
     const turn=ease(.07,.75,value), convergence=ease(.43,.98,value);
-    const radius=mix(Math.min(width*(mobile?.325:.222),height*(mobile?.18:.38)),width*(mobile?.43:.415),convergence);
-    const tilt=mix(.16,1.554,turn);
-    return {radius,convergence,flat:Math.cos(tilt),rotation:mix(-.07,-Math.PI*16/180,turn),cx:width*(mobile?.50:mix(.70,.535,turn)),cy:height*(mobile?mix(.65,.66,turn):mix(.49,.64,turn))};
+    const radius=mix(Math.min(width*(mobile?.325:.222),height*(mobile?.18:.38)),width*(mobile?.43:.25),convergence);
+    const tilt=mix(.78,1.554,turn);
+    return {radius,convergence,flat:Math.cos(tilt),rotation:mix(-.28,-.08,turn),cx:width*(mobile?.50:mix(.70,.73,turn)),cy:height*(mobile?mix(.65,.66,turn):mix(.49,.50,turn))};
   }
   function draw(value) {
     context.setTransform(ratio,0,0,ratio,0,0);context.clearRect(0,0,width,height);
     context.globalAlpha=1;context.drawImage(sky,0,0,width,height);
     const g=geometry(value), {radius:r,flat,convergence:c}=g;
-    plane.style.transformOrigin=`${g.cx}px ${g.cy}px`;
-    plane.style.setProperty('--band-sway',`${5*ease(.45,.96,value)}deg`);
     context.save();context.translate(g.cx,g.cy);context.rotate(g.rotation);
     // Fade spiral structure before the hold; only a stable tapered band remains.
     const diskAlpha=1-ease(.62,.96,value);
@@ -80,38 +109,38 @@ function mountGalaxy() {
     diskProjection.style.transform=`translate(${g.cx-diameter/2}px,${g.cy-diameter/2}px) rotate(${g.rotation}rad) scaleY(${flat})`;
     diskProjection.style.opacity=String(diskAlpha);
     diskProjection.style.visibility=diskAlpha>0?'visible':'hidden';
-    disk.style.animationPlayState=visible&&!document.hidden&&!reducedMotion.matches&&diskAlpha>0?'running':'paused';
     glow(context,3,0,0,r*.31,r*(mix(.055,.027,c)+.20*flat),.74);
     glow(context,3,0,0,r*.15,r*(.017+.087*flat),.9);
-    glow(context,2,0,0,r*.96,r*.026,c*.76);
-    glow(context,3,0,0,r*.53,r*.0075,c*.88);
+    glow(context,2,-r*.12,0,r*.98,r*.070,c*.85);
+    glow(context,1,r*.18,0,r*.79,r*.050,c*.65);
+    glow(context,3,0,0,r*.27,r*.065,c*.95);
     if(c>.02) {
-      const band=context.createLinearGradient(-r,0,r,0);
-      band.addColorStop(0,'#94d9e000');band.addColorStop(.22,'#9bcced4d');band.addColorStop(.48,'#e2ead8b8');band.addColorStop(.52,'#e2ead8b8');band.addColorStop(.8,'#b5a3ef5c');band.addColorStop(1,'#b5a3ef00');
-      context.globalAlpha=c;context.strokeStyle=band;context.lineWidth=.8;context.beginPath();context.moveTo(-r,0);context.lineTo(r,0);context.stroke();
+      context.globalAlpha=c*.85;context.drawImage(edge,-r,-r*.12,r*2,r*.24);
     }
     context.restore();
-    coreGlint.style.transform=`translate3d(${g.cx}px,${g.cy}px,0) rotate(${g.rotation}rad) scale(${r*.15/60},${r*(.016+.075*flat)/60})`;
-    coreGlint.style.opacity=String(mix(.30,.16,c));
-    const labelAlpha=(1-ease(.05,.25,c))*.65+ease(.97,1,c)*.85;
-    const cos=Math.cos(g.rotation),sin=Math.sin(g.rotation),project=(x,y)=>({x:g.cx+x*cos-y*sin,y:g.cy+x*sin+y*cos});
-    context.font=`${mobile?8:10}px ui-monospace, SFMono-Regular, monospace`;context.textAlign='center';
-    for(let index=0;index<devices.length;index++) {
-      const device=devices[index],lineX=(index/(devices.length-1)*2-1)*r*.82;
-      const point=project(mix(device.x*r,lineX,c),device.y*r*flat*(1-c)),anchor=project(lineX,0);
-      if(c>.08&&c<.98) {
-        context.globalAlpha=.15*Math.sin(c*Math.PI);context.strokeStyle=device.color;context.lineWidth=.7;
-        context.beginPath();context.moveTo(point.x,point.y);context.quadraticCurveTo(mix(point.x,anchor.x,.6),anchor.y-18*(1-c),anchor.x,anchor.y);context.stroke();
-      }
-      glints[index].style.transform=`translate3d(${point.x}px,${point.y}px,0)`;
-      glow(context,index%2?1:2,point.x,point.y,19,19,1);
-      context.globalAlpha=.78;context.strokeStyle=device.color;context.lineWidth=.8;
-      context.beginPath();context.moveTo(point.x-6,point.y);context.lineTo(point.x+6,point.y);context.moveTo(point.x,point.y-8);context.lineTo(point.x,point.y+8);context.stroke();
-      context.globalAlpha=1;context.fillStyle='#effff8';context.beginPath();context.arc(point.x,point.y,mix(1.8,2.3,c),0,TAU);context.fill();
-      if(labelAlpha>.001) {const half=context.measureText(device.name).width/2,labelX=Math.max(half+8,Math.min(width-half-8,point.x));context.globalAlpha=labelAlpha;context.fillStyle='#c1cfdf';context.fillText(device.name,labelX,point.y+23);}
-    }
+    coreGlint.style.transform=`translate3d(${g.cx}px,${g.cy}px,0) rotate(${g.rotation}rad) scale(${r*.15/60},${r*(.042+.075*flat)/60})`;
+    coreGlint.style.opacity=String(mix(.30,.36,c));
     context.globalAlpha=1;scene.classList.add('is-rendered');
   }
+  function moveStars(value) {
+    const g=geometry(value),{radius:r,flat,convergence:c}=g;
+    disk.style.transform=`rotate(${orbit*.61}rad)`;
+    for(const {layer,rate} of dust)layer.style.transform=`rotate(${orbit*rate}rad)`;
+    const labelAlpha=(1-ease(.05,.25,c))*.65+ease(.97,1,c)*.85;
+    const cos=Math.cos(g.rotation),sin=Math.sin(g.rotation);
+    for(let index=0;index<devices.length;index++) {
+      const device=devices[index],lineX=(index/(devices.length-1)*2-1)*r*.82;
+      const spinCos=Math.cos(orbit*device.rate),spinSin=Math.sin(orbit*device.rate);
+      const x=mix((device.x*spinCos-device.y*spinSin)*r,lineX,c);
+      const y=(device.x*spinSin+device.y*spinCos)*r*flat*(1-c);
+      const px=g.cx+x*cos-y*sin,py=g.cy+x*sin+y*cos,element=glints[index];
+      element.style.transform=`translate3d(${px}px,${py}px,0)`;
+      const label=element.firstChild,half=device.labelWidth/2;
+      label.style.opacity=String(labelAlpha);
+      label.style.left=`${Math.max(half+8,Math.min(width-half-8,px))-px}px`;
+    }
+  }
+  const orbitSpeed=value=>1-ease(.43,.90,value);
   function showPhase(value) {
     const next=value<.34?0:value<.73?1:2;if(next===phase)return;phase=next;
     panels.forEach((panel,index)=>{panel.classList.toggle('is-active',index===next);panel.classList.toggle('is-past',index<next);panel.setAttribute('aria-hidden',String(index!==next));panel.inert=index!==next;});
@@ -119,10 +148,9 @@ function mountGalaxy() {
   }
   function schedule() {
     scene.classList.toggle('ambient-active',visible&&!document.hidden&&!reducedMotion.matches);
-    disk.style.animationPlayState=visible&&!document.hidden&&!reducedMotion.matches&&progress<.96?'running':'paused';
     if(frame||document.hidden||!visible)return;
-    if(reducedMotion.matches) {if(dirty){draw(0);dirty=false;}return;}
-    if(dirty||progress!==target) {previous=performance.now();frame=requestAnimationFrame(animate);}
+    if(reducedMotion.matches) {if(dirty){draw(0);moveStars(0);dirty=false;}return;}
+    if(dirty||progress!==target||orbitSpeed(progress)>0) {previous=performance.now();frame=requestAnimationFrame(animate);}
   }
   function updateScroll() {
     if(reducedMotion.matches)return;
@@ -134,9 +162,12 @@ function mountGalaxy() {
   function animate(now) {
     frame=0;if(document.hidden||!visible||reducedMotion.matches)return;
     const elapsed=Math.min(Math.max((now-previous)/1000,0),.05);previous=now;
+    const lastProgress=progress;
     progress=mix(progress,target,1-Math.exp(-elapsed/.075));if(Math.abs(progress-target)<.0002)progress=target;
-    draw(progress);showPhase(progress);dirty=false;
-    if(progress!==target)frame=requestAnimationFrame(animate);
+    orbit+=elapsed*TAU/44*orbitSpeed(progress);
+    if(dirty||progress!==lastProgress) {draw(progress);showPhase(progress);dirty=false;}
+    moveStars(progress);
+    if(progress!==target||orbitSpeed(progress)>0)frame=requestAnimationFrame(animate);
   }
   function synchronize() {cancelAnimationFrame(frame);frame=0;schedule();}
   function resize() {
@@ -144,6 +175,8 @@ function mountGalaxy() {
     if(width!==nextWidth||height!==nextHeight||ratio!==nextRatio) {
       width=nextWidth;height=nextHeight;ratio=nextRatio;mobile=width<=660;
       canvas.width=Math.round(width*ratio);canvas.height=Math.round(height*ratio);bakeSky();dirty=true;
+      context.font=`${mobile?8:10}px ui-monospace, SFMono-Regular, monospace`;
+      devices.forEach(device=>{device.labelWidth=context.measureText(device.name).width;});
     }
     headerOffset=parseFloat(getComputedStyle(stage).top)||0;updateScroll();schedule();
   }
