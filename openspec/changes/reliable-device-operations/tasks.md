@@ -20,7 +20,7 @@
 ## 4. Integrated verification
 
 - [ ] 4.1 Deploy privately to the existing Pi and verify telemetry, physical-host admission, process-tree resource controls, recovery evidence and offline KVM execution without publishing private inventory or backups.
-- [ ] 4.2 Run Python/native regression tests and strict OpenSpec validation, inspect publication privacy, and publish reviewed changes with the repository owner's identity.
+- [x] 4.2 Run Python/native regression tests and strict OpenSpec validation, inspect publication privacy, and publish reviewed changes with the repository owner's identity.
 
 ## Verification notes
 
@@ -28,3 +28,6 @@
 - Native cgroup CPU placement, aggregate memory enforcement, OOM handling, descendant cleanup and scope removal passed in a real ARM64 Linux QEMU guest.
 - The connected Pi passed offline KVM execution, fresh-root output, measured telemetry, allocation visibility and cleanup checks. Its current user service lacks cpuset delegation, so explicit cgroup admission is rejected; on-Pi process-tree enforcement remains pending administrator provisioning.
 - Monitoring was checked at desktop and narrow widths with actual Pi measurements and with an older agent that has no telemetry.
+- The upgraded local QEMU target completed an explicit cgroup experiment through the controller: CPU 1, 256 MiB, non-synthetic execution and confirmed empty/removed resource scope. Its real telemetry reports available delegation.
+- The actual MCP stdio protocol completed initialization, read-only tool discovery and Pi telemetry retrieval. The required Python suite ran 168 tests with one platform-specific skip; native transaction tests, console behavior checks and seven strict OpenSpec changes passed.
+- Feature commit `e731121` was published after the tracked-file privacy review. No private inventory, credentials, images, backups or runtime evidence were committed.
