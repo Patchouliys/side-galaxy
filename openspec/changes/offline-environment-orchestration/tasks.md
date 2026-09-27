@@ -20,4 +20,4 @@
 ## 4. Integrated execution
 
 - [x] 4.1 Deploy through private offline staging and run a real physical Linux workload, queue, cancellation, reload and output retrieval; retain evidence and backups only in ignored local files.
-- [ ] 4.2 Run required Python/native checks, strict OpenSpec validation and interface checks; inspect public changes for private data and publish with the repository owner's identity.
+- [x] 4.2 Run required Python/native checks, strict OpenSpec validation and interface checks; inspect public changes for private data and publish with the repository owner's identity.
