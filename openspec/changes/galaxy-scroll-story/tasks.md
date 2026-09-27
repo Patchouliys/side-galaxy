@@ -17,7 +17,13 @@
 ## 4. Performance and final composition
 
 - [x] 4.1 Cache static galaxy layers and use demand-driven rendering; verify fewer draw calls and compare browser callback timings against the saved baseline at the same viewport, plus idle/offscreen/reduced-motion lifecycle checks.
-- [x] 4.2 Replace board glyphs with bright star points and remove all idle orbital rotation; verify the final light band and labels remain fixed after convergence.
+- [x] 4.2 Replace board glyphs with bright star points and remove independent idle orbit animation; verify the final light band and labels retain their relative positions after convergence.
 - [x] 4.3 Add a final scroll hold and update the brand guide; verify final convergence precedes sticky release on desktop and mobile without intercepting scrolling.
 
-- [x] 4.4 Add restrained composited star glints and core breathing; visually verify subtle depth, stationary final geometry, and paused effects offscreen or with reduced motion.
+- [x] 4.4 Add restrained composited star glints and core breathing; visually verify subtle depth, rigid final geometry, and paused effects offscreen or with reduced motion.
+
+
+## 5. Workflow layout and band motion
+
+- [x] 5.1 Restore the three-column desktop workflow and narrow-screen stacking; verify browser geometry, readability, and no horizontal overflow.
+- [x] 5.2 Add gentle synchronized band rotation without idle canvas rendering; verify coherent band/star motion and pause behavior for hidden/offscreen/reduced-motion states.

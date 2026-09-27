@@ -37,18 +37,18 @@ The homepage and console SHALL use the original shared star-and-orbit logo that 
 
 
 ### Requirement: Stable star convergence and final hold
-The scene SHALL represent devices with bright star points instead of board glyphs. After convergence, the light band and star positions SHALL remain fixed while a reserved scroll interval precedes the workflow section.
+The scene SHALL represent devices with bright star points instead of board glyphs. After convergence, the light band and star positions SHALL remain fixed relative to one another during gentle group rotation while a reserved scroll interval precedes the workflow section.
 
 #### Scenario: Completed convergence
 - **WHEN** the visitor reaches the final animation phase and pauses or continues within the final hold interval
-- **THEN** no residual orbit rotates across the fixed line, and the completed composition remains visible before the workflow enters
+- **THEN** no residual orbit rotates across the light band, and the completed composition remains visible before the workflow enters
 
 ### Requirement: Rendering stops when the scene settles
 The main galaxy canvas SHALL stop scheduling animation frames when its scroll transition has settled, or when it is hidden or offscreen. Scrolling SHALL resume a smooth reversible transition without regenerating static galaxy detail every frame.
 
 #### Scenario: Idle scene
 - **WHEN** the visitor stops scrolling and interpolation reaches the requested position
-- **THEN** no recurring canvas render loop continues; subtle opacity and scale changes in decorative overlays may continue without moving the band or device positions
+- **THEN** no recurring canvas render loop continues; composited decorative effects and gentle whole-band rotation may continue without changing the relative positions of the band and device stars
 
 #### Scenario: Resume scrolling
 - **WHEN** the visitor scrolls again
@@ -56,12 +56,24 @@ The main galaxy canvas SHALL stop scheduling animation frames when its scroll tr
 
 
 ### Requirement: Restrained ambient depth
-The homepage SHALL provide subtle star glints and core breathing without rotating the final light band or moving device stars. These decorative effects SHALL stop when the page is hidden, the scene is offscreen, or reduced motion is requested.
+The homepage SHALL provide subtle star glints and core breathing with gentle synchronized rotation of the final light band and device stars. These decorative effects SHALL stop when the page is hidden, the scene is offscreen, or reduced motion is requested.
 
 #### Scenario: Gentle motion at rest
 - **WHEN** the visitor pauses on a visible scene with motion enabled
-- **THEN** star brightness and core glow change subtly while device positions and the light band remain fixed
+- **THEN** star brightness and core glow change subtly while the light band and stars tilt gently together without crossing or separating
 
 #### Scenario: Ambient effects disabled
 - **WHEN** reduced motion is requested or the scene is no longer visible
 - **THEN** recurring ambient effects are disabled or paused
+
+
+### Requirement: Parallel workflow cards
+The homepage SHALL display the upload, execution, and results steps as three side-by-side cards on desktop, preserving their order in a single column on narrow screens.
+
+#### Scenario: Desktop workflow
+- **WHEN** the homepage is viewed on a desktop viewport
+- **THEN** all three workflow steps occupy the same row with diagrams beneath their text
+
+#### Scenario: Narrow workflow
+- **WHEN** the viewport is too narrow for three readable cards
+- **THEN** the steps stack in their original order without horizontal overflow

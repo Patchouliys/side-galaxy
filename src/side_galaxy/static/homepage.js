@@ -7,7 +7,7 @@ const ease = (start,end,value) => { const t=clamp((value-start)/(end-start)); re
 function mountGalaxy() {
   const canvas=document.getElementById('galaxy-canvas'), story=document.getElementById('galaxy-story');
   const context=canvas?.getContext('2d',{alpha:true}); if (!context || !story) return;
-  const stage=story.querySelector('.story-stage'), scene=canvas.parentElement;
+  const stage=story.querySelector('.story-stage'), plane=canvas.parentElement, scene=plane.parentElement;
   const panels=[...story.querySelectorAll('.story-panel')], markers=[...story.querySelectorAll('.story-markers li')];
   const TAU=Math.PI*2, palette=['#a9dfec','#87b4eb','#b1a0e4','#d8eee8','#ffedc8'];
   let seed=7919;
@@ -48,7 +48,7 @@ function mountGalaxy() {
   const stars=Array.from({length:135},()=>({x:random(),y:random(),size:.4+random()*.8,alpha:.12+random()*.28}));
   const sky=document.createElement('canvas');
   const devices=[['Pi 4',-2.55,1.23],['Pi 5',-1.10,1.24],['QEMU',.03,1.15],['Linux',.93,1.23],['KVM guest',2.00,1.25],['Custom',2.92,1.18]].map(([name,angle,r],index)=>({name,x:Math.cos(angle)*r,y:Math.sin(angle)*r,color:index%2?'#bca7ee':'#a9e9e0'}));
-  const ambient=document.createElement('div');ambient.className='galaxy-glints';ambient.setAttribute('aria-hidden','true');scene.appendChild(ambient);
+  const ambient=document.createElement('div');ambient.className='galaxy-glints';ambient.setAttribute('aria-hidden','true');plane.appendChild(ambient);
   const coreGlint=document.createElement('span');coreGlint.className='core-glint';ambient.appendChild(coreGlint);
   const glints=devices.map(()=>{const element=document.createElement('span');element.className='star-glint';ambient.appendChild(element);return element;});
   let width=0,height=0,ratio=1,mobile=false,frame=0,previous=0,visible=true,progress=0,target=0,phase=-1,headerOffset=0,dirty=true;
@@ -67,6 +67,8 @@ function mountGalaxy() {
     context.setTransform(ratio,0,0,ratio,0,0);context.clearRect(0,0,width,height);
     context.globalAlpha=1;context.drawImage(sky,0,0,width,height);
     const g=geometry(value), {radius:r,flat,convergence:c}=g;
+    plane.style.transformOrigin=`${g.cx}px ${g.cy}px`;
+    plane.style.setProperty('--band-sway',`${2*ease(.45,.96,value)}deg`);
     context.save();context.translate(g.cx,g.cy);context.rotate(g.rotation);
     // Fade spiral structure before the hold; only a stable tapered band remains.
     const diskAlpha=1-ease(.62,.96,value);
