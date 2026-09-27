@@ -9,7 +9,7 @@ The homepage currently shows a fixed edge-on galaxy without explaining how indep
 - Preserve the original shared star-and-orbit logo.
 - Start the homepage with a face-on nebula surrounded by device stars, then tilt and converge them into one managed light band as the visitor scrolls.
 - Represent devices as bright stars, hold the completed stable light band briefly during scrolling, and then reveal the upload, execution, and results steps.
-- Cache galaxy detail and redraw it only while scroll transitions change, removing idle rotation and overlapping orbital effects. Add restrained composited star glints and a soft core breath with a small synchronized tilt of the completed band and stars.
+- Cache galaxy detail and redraw it only while scroll transitions change. Rotate the cached face-on disk as a composited layer, project it through the scroll-driven tilt, and fade it out before final convergence. Add restrained star glints, a soft core breath, and a visible synchronized sway of the completed band and stars without overlapping orbital effects.
 - Preserve natural scrolling, skip links, reduced-motion readability, and a useful no-JavaScript fallback.
 
 - Present the three experiment workflow steps side by side on desktop and stack them on narrow screens.

@@ -45,6 +45,8 @@ function mountGalaxy() {
     }
   }
   bakeDisk();
+  const diskProjection=document.createElement('div');diskProjection.className='galaxy-disk';
+  diskProjection.appendChild(disk);plane.insertBefore(diskProjection,canvas);
   const stars=Array.from({length:135},()=>({x:random(),y:random(),size:.4+random()*.8,alpha:.12+random()*.28}));
   const sky=document.createElement('canvas');
   const devices=[['Pi 4',-2.55,1.23],['Pi 5',-1.10,1.24],['QEMU',.03,1.15],['Linux',.93,1.23],['KVM guest',2.00,1.25],['Custom',2.92,1.18]].map(([name,angle,r],index)=>({name,x:Math.cos(angle)*r,y:Math.sin(angle)*r,color:index%2?'#bca7ee':'#a9e9e0'}));
@@ -68,11 +70,17 @@ function mountGalaxy() {
     context.globalAlpha=1;context.drawImage(sky,0,0,width,height);
     const g=geometry(value), {radius:r,flat,convergence:c}=g;
     plane.style.transformOrigin=`${g.cx}px ${g.cy}px`;
-    plane.style.setProperty('--band-sway',`${2*ease(.45,.96,value)}deg`);
+    plane.style.setProperty('--band-sway',`${5*ease(.45,.96,value)}deg`);
     context.save();context.translate(g.cx,g.cy);context.rotate(g.rotation);
     // Fade spiral structure before the hold; only a stable tapered band remains.
     const diskAlpha=1-ease(.62,.96,value);
-    if(diskAlpha>0) {context.globalAlpha=diskAlpha;context.drawImage(disk,-r*diskExtent,-r*diskExtent*flat,r*diskExtent*2,r*diskExtent*flat*2);}
+    // Rotate the cached texture before projection; no idle canvas redraw is needed.
+    const diameter=r*diskExtent*2;
+    diskProjection.style.width=diskProjection.style.height=`${diameter}px`;
+    diskProjection.style.transform=`translate(${g.cx-diameter/2}px,${g.cy-diameter/2}px) rotate(${g.rotation}rad) scaleY(${flat})`;
+    diskProjection.style.opacity=String(diskAlpha);
+    diskProjection.style.visibility=diskAlpha>0?'visible':'hidden';
+    disk.style.animationPlayState=visible&&!document.hidden&&!reducedMotion.matches&&diskAlpha>0?'running':'paused';
     glow(context,3,0,0,r*.31,r*(mix(.055,.027,c)+.20*flat),.74);
     glow(context,3,0,0,r*.15,r*(.017+.087*flat),.9);
     glow(context,2,0,0,r*.96,r*.026,c*.76);
@@ -111,6 +119,7 @@ function mountGalaxy() {
   }
   function schedule() {
     scene.classList.toggle('ambient-active',visible&&!document.hidden&&!reducedMotion.matches);
+    disk.style.animationPlayState=visible&&!document.hidden&&!reducedMotion.matches&&progress<.96?'running':'paused';
     if(frame||document.hidden||!visible)return;
     if(reducedMotion.matches) {if(dirty){draw(0);dirty=false;}return;}
     if(dirty||progress!==target) {previous=performance.now();frame=requestAnimationFrame(animate);}

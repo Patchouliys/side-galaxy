@@ -26,4 +26,4 @@
 ## 5. Workflow layout and band motion
 
 - [x] 5.1 Restore the three-column desktop workflow and narrow-screen stacking; verify browser geometry, readability, and no horizontal overflow.
-- [x] 5.2 Add gentle synchronized band rotation without idle canvas rendering; verify coherent band/star motion and pause behavior for hidden/offscreen/reduced-motion states.
+- [x] 5.2 Add visible cached-disk rotation and synchronized band sway without idle canvas rendering; verify the 36-second disk turn, fade before final convergence, coherent band/star motion through the full ±5-degree sway range, and pause behavior for hidden/offscreen/reduced-motion states.

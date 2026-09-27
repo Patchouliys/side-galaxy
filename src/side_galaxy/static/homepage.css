@@ -38,10 +38,13 @@ h2 span{color:#a3b9c8}
 .story-actions{position:relative;display:flex;gap:29px;align-items:center;z-index:2;margin:18px 0 40px}
 .galaxy-scene{position:absolute;inset:0;z-index:0;overflow:hidden;pointer-events:none;opacity:.42}
 .galaxy-plane{position:absolute;inset:0}
-.is-rendered .galaxy-plane{animation:band-sway 12s ease-in-out infinite alternate;animation-play-state:paused}
+.is-rendered .galaxy-plane{animation:band-sway 6s ease-in-out infinite alternate;animation-play-state:paused}
 .ambient-active .galaxy-plane{animation-play-state:running}
 @keyframes band-sway{from{transform:rotate(calc(-1 * var(--band-sway,0deg)))}to{transform:rotate(var(--band-sway,0deg))}}
-#galaxy-canvas{display:block;width:100%;height:100%}
+.galaxy-disk{position:absolute;left:0;top:0;pointer-events:none;transform-origin:center}
+.galaxy-disk canvas{display:block;width:100%;height:100%;animation:nebula-spin 36s linear infinite;animation-play-state:paused}
+@keyframes nebula-spin{to{transform:rotate(360deg)}}
+#galaxy-canvas{position:relative;display:block;width:100%;height:100%}
 .galaxy-fallback{position:absolute;width:90%;left:22%;top:25%;opacity:.75}
 .galaxy-scene.is-rendered .galaxy-fallback{display:none}
 .galaxy-glints{position:absolute;inset:0;pointer-events:none;opacity:0}

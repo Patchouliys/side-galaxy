@@ -48,7 +48,7 @@ The main galaxy canvas SHALL stop scheduling animation frames when its scroll tr
 
 #### Scenario: Idle scene
 - **WHEN** the visitor stops scrolling and interpolation reaches the requested position
-- **THEN** no recurring canvas render loop continues; composited decorative effects and gentle whole-band rotation may continue without changing the relative positions of the band and device stars
+- **THEN** no recurring canvas render loop continues; CSS transforms may rotate cached disk pixels before convergence and sway the complete band afterward without changing the relative positions of the final band and device stars
 
 #### Scenario: Resume scrolling
 - **WHEN** the visitor scrolls again
@@ -56,11 +56,15 @@ The main galaxy canvas SHALL stop scheduling animation frames when its scroll tr
 
 
 ### Requirement: Restrained ambient depth
-The homepage SHALL provide subtle star glints and core breathing with gentle synchronized rotation of the final light band and device stars. These decorative effects SHALL stop when the page is hidden, the scene is offscreen, or reduced motion is requested.
+The homepage SHALL provide visibly rotating cached disk detail before convergence, subtle star glints and core breathing, and synchronized sway of the final light band and device stars. The disk SHALL fade out before final convergence. These decorative effects SHALL use composited transforms or opacity without idle canvas redraws, and SHALL stop when the page is hidden, the scene is offscreen, or reduced motion is requested.
+
+#### Scenario: Visible disk rotation
+- **WHEN** the visitor pauses on the opening or tilted galaxy with motion enabled
+- **THEN** the cached disk rotates visibly within its projected plane, and scrolling toward convergence fades it out without leaving a crossing ring or duplicate disk
 
 #### Scenario: Gentle motion at rest
 - **WHEN** the visitor pauses on a visible scene with motion enabled
-- **THEN** star brightness and core glow change subtly while the light band and stars tilt gently together without crossing or separating
+- **THEN** star brightness and core glow change subtly; in the final phase the light band, device stars, and glints sway together without crossing, separating, or clipping essential content
 
 #### Scenario: Ambient effects disabled
 - **WHEN** reduced motion is requested or the scene is no longer visible
