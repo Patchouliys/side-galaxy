@@ -14,16 +14,54 @@
           - galaxy_wheel | basename is match('^side_galaxy-.*\.whl$')
           - not galaxy_wheel.endswith('-any.whl')
         fail_msg: This bootstrap playbook supports Debian-family Linux; add another OS playbook for other systems.
+    - name: Require controller wheelhouse for offline deployment
+      ansible.builtin.assert:
+        that:
+          - galaxy_wheelhouse is defined
+          - galaxy_wheelhouse | default('') | length > 0
+        fail_msg: Offline deployment requires galaxy_wheelhouse with all pinned dependencies as target-compatible wheels.
+      when: galaxy_offline | default(false) | bool
+    - name: Check offline wheelhouse on controller
+      ansible.builtin.stat:
+        path: "{{ galaxy_wheelhouse if galaxy_wheelhouse.startswith('/') else playbook_dir ~ '/' ~ galaxy_wheelhouse }}"
+      register: galaxy_wheelhouse_stat
+      delegate_to: localhost
+      become: false
+      when: galaxy_offline | default(false) | bool
+    - name: Require a local wheelhouse directory
+      ansible.builtin.assert:
+        that:
+          - galaxy_wheelhouse_stat.stat.isdir | default(false)
+        fail_msg: galaxy_wheelhouse must name an existing directory on the Ansible controller.
+      when: galaxy_offline | default(false) | bool
+    - name: Check preinstalled offline Python and native runtimes
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - "import ctypes, ensurepip, venv; ctypes.CDLL('libsqlite3.so.0'); ctypes.CDLL('libstdc++.so.6')"
+      changed_when: false
+      when: galaxy_offline | default(false) | bool
+    - name: Check preinstalled offline libvirt client when requested
+      ansible.builtin.command:
+        argv: [virsh, --version]
+      changed_when: false
+      when:
+        - galaxy_offline | default(false) | bool
+        - galaxy_system | default('linux-process') == 'linux-kvm'
     - name: Install Python and native library runtimes
       ansible.builtin.apt:
         name: [python3-venv, python3-pip, libsqlite3-0, libstdc++6]
         state: present
         update_cache: true
+      when: not (galaxy_offline | default(false) | bool)
     - name: Install KVM client only when requested
       ansible.builtin.apt:
         name: libvirt-clients
         state: present
-      when: galaxy_system | default('linux-process') == 'linux-kvm'
+      when:
+        - not (galaxy_offline | default(false) | bool)
+        - galaxy_system | default('linux-process') == 'linux-kvm'
     - name: Create runtime account
       ansible.builtin.user:
         name: galaxy
@@ -47,6 +85,14 @@
         dest: /opt/side-galaxy/requirements.txt
         mode: '0644'
       notify: Restart agent
+    - name: Copy private offline wheelhouse
+      ansible.builtin.copy:
+        src: '{{ galaxy_wheelhouse_stat.stat.path }}/'
+        dest: /opt/side-galaxy/wheelhouse/
+        mode: '0600'
+        directory_mode: '0700'
+      when: galaxy_offline | default(false) | bool
+      notify: Restart agent
     - name: Create virtual environment
       ansible.builtin.command:
         cmd: python3 -m venv /opt/side-galaxy/venv
@@ -56,11 +102,50 @@
         requirements: /opt/side-galaxy/requirements.txt
         virtualenv: /opt/side-galaxy/venv
         extra_args: --require-hashes
+      when: not (galaxy_offline | default(false) | bool)
+    - name: Install pinned dependencies from offline wheels
+      ansible.builtin.command:
+        argv:
+          - /opt/side-galaxy/venv/bin/python
+          - -m
+          - pip
+          - install
+          - --no-index
+          - --find-links=/opt/side-galaxy/wheelhouse
+          - '--only-binary=:all:'
+          - --require-hashes
+          - -r
+          - /opt/side-galaxy/requirements.txt
+      environment:
+        PIP_CONFIG_FILE: /dev/null
+        PIP_DISABLE_PIP_VERSION_CHECK: '1'
+      register: galaxy_offline_dependencies
+      changed_when: "'Successfully installed' in galaxy_offline_dependencies.stdout"
+      when: galaxy_offline | default(false) | bool
+      notify: Restart agent
     - name: Install application wheel
       ansible.builtin.pip:
         name: '/opt/side-galaxy/{{ galaxy_wheel | basename }}'
         virtualenv: /opt/side-galaxy/venv
         extra_args: --no-deps --force-reinstall
+      when: not (galaxy_offline | default(false) | bool)
+      notify: Restart agent
+    - name: Install application wheel offline
+      ansible.builtin.command:
+        argv:
+          - /opt/side-galaxy/venv/bin/python
+          - -m
+          - pip
+          - install
+          - --no-index
+          - '--only-binary=:all:'
+          - --no-deps
+          - --force-reinstall
+          - '/opt/side-galaxy/{{ galaxy_wheel | basename }}'
+      environment:
+        PIP_CONFIG_FILE: /dev/null
+        PIP_DISABLE_PIP_VERSION_CHECK: '1'
+      when: galaxy_offline | default(false) | bool
       notify: Restart agent
     - name: Install board-specific private credentials
       ansible.builtin.copy:

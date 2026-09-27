@@ -1,0 +1,1 @@
+{"id":"qemu-environment","name":"Offline QEMU environments","module":"qemu_environment","requires":"QEMU, qemu-img and KVM access on Linux; prepared offline guest with Python 3.11+ and QEMU Guest Agent","verified_on_hardware":false}

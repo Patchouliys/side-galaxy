@@ -2,17 +2,18 @@ import asyncio
 from contextlib import asynccontextmanager
 import hmac
 import os
+import tempfile
 import uuid
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Query
 from fastapi.responses import FileResponse, JSONResponse, Response
 from urllib.parse import quote
 from .workload_runner import MAX_BUNDLE
 from fastapi.staticfiles import StaticFiles
 
 from pydantic import Field
-from .models import Completion, Enrollment, Heartbeat, Plan, Strict
+from .models import Completion, Enrollment, Heartbeat, Plan, Strict, LogChunk
 from .profiles import catalog
 from .store import Conflict, Store
 from .workspace import Workspace
@@ -41,6 +42,8 @@ def create_app(db_path=".data/galaxy.db", demo=False, token=None, read_token=Non
     loopback_only = local_access or demo
     anonymous_local = loopback_only and token is None
     store = Store(db_path)
+    from .run_logs import RunLogs
+    logs = RunLogs(store)
     workspace = Workspace(store, demo)
     managed_dirs = [Path(p).resolve() for p in (lab_dirs if lab_dirs is not None else [Path(db_path).parent / 'lab'])]
     restart_tasks, restart_operations = {}, {}
@@ -85,11 +88,12 @@ def create_app(db_path=".data/galaxy.db", demo=False, token=None, read_token=Non
         origin = request.headers.get("origin")
         if origin and origin != str(request.base_url).rstrip("/"):
             return JSONResponse({"detail": "Cross-origin access denied"}, status_code=403)
-        limit = MAX_BUNDLE if request.url.path == "/api/artifacts" else 3 * 1024 * 1024 if request.url.path.endswith("/finish") else 300000
+        from .environments import MAX_ENVIRONMENT
+        limit = MAX_ENVIRONMENT if request.url.path == "/api/environments" else MAX_BUNDLE if request.url.path == "/api/artifacts" else 3 * 1024 * 1024 if request.url.path.endswith("/finish") else 300000
         length = request.headers.get("content-length", "0")
         if not length.isdigit() or int(length) > limit:
             return JSONResponse({"detail": "Request too large"}, status_code=413)
-        if request.method in ("POST", "PUT", "PATCH"):
+        if request.method in ("POST", "PUT", "PATCH") and request.url.path != "/api/environments":
             body = bytearray()
             async for chunk in request.stream():
                 body.extend(chunk)
@@ -146,6 +150,37 @@ def create_app(db_path=".data/galaxy.db", demo=False, token=None, read_token=Non
         item, content = store.output_file(run_id, index)
         name = str(item.get("path", "output")).split("/")[-1]
         return Response(content, media_type="application/octet-stream", headers={"Content-Disposition": "attachment; filename*=UTF-8''" + quote(name, safe=""), "X-Content-SHA256": item["sha256"]})
+
+    @app.post('/api/environments', dependencies=[Depends(writer)], status_code=201)
+    async def upload_environment(request: Request):
+        from .environments import MAX_ENVIRONMENT
+        fd, name = tempfile.mkstemp(prefix='.upload-', dir=store.environments.root)
+        total = 0
+        try:
+            with os.fdopen(fd, 'wb') as stream:
+                async for chunk in request.stream():
+                    total += len(chunk)
+                    if total > MAX_ENVIRONMENT: raise HTTPException(413, 'Environment package exceeds limit')
+                    await asyncio.to_thread(stream.write, chunk)
+            try: return await asyncio.to_thread(store.environments.put_file, name)
+            except ValueError as exc: raise HTTPException(422, str(exc)) from None
+        finally:
+            Path(name).unlink(missing_ok=True)
+
+    @app.get('/api/environments', dependencies=[Depends(reader)])
+    def environments(): return store.environments.list()
+
+    @app.get('/api/agent/{board_id}/environments/{sha}', dependencies=[Depends(board_auth)])
+    def agent_environment(board_id: str, sha: str):
+        return FileResponse(store.environment_for_agent(board_id, sha), media_type='application/zip')
+
+    @app.get('/api/runs/{run_id}/logs', dependencies=[Depends(reader)])
+    def run_logs(run_id: str, after: int = Query(default=0, ge=0, le=1000000)):
+        return logs.read(run_id, after)
+
+    @app.post('/api/agent/{board_id}/runs/{run_id}/logs', dependencies=[Depends(board_auth)])
+    def append_logs(board_id: str, run_id: str, data: LogChunk):
+        return logs.append(board_id, run_id, [event.model_dump() for event in data.events], data.truncated)
 
     @app.get("/healthz")
     def health(): return {"status": "ok", **store.workspace_mode(), "version": "0.1.0"}
@@ -209,11 +244,11 @@ def create_app(db_path=".data/galaxy.db", demo=False, token=None, read_token=Non
         return store.board_action(board_id, "recover")
 
     @app.post("/api/preflight", dependencies=[Depends(reader)])
-    def preflight(plan: Plan): return store.preflight(plan)
+    def preflight(plan: Plan, enqueue: bool = False): return store.preflight(plan, enqueue=enqueue)
 
     @app.post("/api/batches", dependencies=[Depends(writer)], status_code=201)
-    def submit(plan: Plan, idempotency_key: str = Header(min_length=1, max_length=128)):
-        return store.submit(plan, idempotency_key)
+    def submit(plan: Plan, idempotency_key: str = Header(min_length=1, max_length=128), enqueue: bool = False):
+        return store.submit(plan, idempotency_key, enqueue=enqueue)
 
     @app.get("/api/batches", dependencies=[Depends(reader)])
     def batches(): return workspace.batches()

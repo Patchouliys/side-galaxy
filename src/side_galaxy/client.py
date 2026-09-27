@@ -57,6 +57,46 @@ class Client:
         artifacts.put(bytes(data))
         return artifacts.get(sha)
 
+    def logs(self, board, run, events, truncated=False):
+        return self.request('POST', f'/api/agent/{board}/runs/{run}/logs', {'events': events, 'truncated': truncated})
+
+    def upload_environment(self, path):
+        from .environments import MAX_ENVIRONMENT, validate_environment
+        path = Path(path)
+        if path.stat().st_size > MAX_ENVIRONMENT: raise ValueError('Environment package exceeds limit')
+        validate_environment(path)
+        with path.open('rb') as stream:
+            response = self.http.post('/api/environments', content=iter(lambda: stream.read(1024 * 1024), b''),
+                                      headers={'Content-Type': 'application/zip', 'Content-Length': str(path.stat().st_size)}, timeout=900)
+        if response.is_error: raise ValueError(f'Environment upload rejected: HTTP {response.status_code}')
+        return response.json()
+
+    def fetch_environment(self, board, sha, root, cancelled=lambda: False):
+        import tempfile
+        from .environments import EnvironmentStore, MAX_ENVIRONMENT
+        environments = EnvironmentStore(root)
+        try: return environments.get(sha)
+        except KeyError: pass
+        deadline = time.monotonic() + 900
+        fd, name = tempfile.mkstemp(prefix='.download-', dir=environments.root)
+        try:
+            total, checksum = 0, hashlib.sha256()
+            with os.fdopen(fd, 'wb') as stream:
+                with self.http.stream('GET', f'/api/agent/{board}/environments/{sha}', timeout=30) as response:
+                    if response.is_error: raise ValueError('Environment download rejected')
+                    for chunk in response.iter_bytes(1024 * 1024):
+                        if cancelled(): raise InterruptedError("Environment download cancelled")
+                        total += len(chunk)
+                        if total > MAX_ENVIRONMENT or time.monotonic() > deadline:
+                            raise ValueError('Environment transfer exceeded size or time limit')
+                        checksum.update(chunk)
+                        stream.write(chunk)
+            if checksum.hexdigest() != sha: raise ValueError('Environment digest mismatch')
+            if cancelled(): raise InterruptedError("Environment download cancelled")
+            environments.put_file(name)
+            return environments.get(sha)
+        finally: Path(name).unlink(missing_ok=True)
+
     def download_output(self, run, index):
         data = bytearray()
         with self.http.stream("GET", f"/api/runs/{run}/outputs/{index}") as response:

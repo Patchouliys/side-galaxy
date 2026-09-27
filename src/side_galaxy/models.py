@@ -19,6 +19,7 @@ class Plan(Strict):
     memory_mib: int | None = Field(default=256, ge=128, le=65536)
     duration_seconds: int = Field(default=5, ge=1, le=86400)
     artifact_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    environment_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     arguments: list[str] = Field(default_factory=list, max_length=64)
     environment: dict[str, str] = Field(default_factory=dict, max_length=64)
     bandwidth_percent: int | None = Field(default=None, ge=1, le=100)
@@ -38,6 +39,8 @@ class Plan(Strict):
             raise ValueError("Invalid or oversized environment entry")
         if len(json.dumps(self.model_dump(), ensure_ascii=True)) > 32768:
             raise ValueError("Plan exceeds 32 KiB serialized limit")
+        if self.environment_sha256 and self.template != "workload":
+            raise ValueError("Prepared environments require a workload bundle")
         cores = self.cpus + self.interference_cpus
         if len(set(cores)) != len(cores) or any(c < 0 for c in cores):
             raise ValueError("Core sets must be nonnegative, unique and disjoint")
@@ -70,7 +73,9 @@ class Description(Strict):
     templates: list[str] = Field(min_length=1, max_length=64)
     module_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     memory_limit_required: bool = False
+    environment_required: bool = False
     execution_environment: ExecutionEnvironment | None = None
+    environment_architectures: list[Literal["aarch64", "x86_64"]] = Field(default_factory=list, max_length=2)
     cleanup_scope: Literal["process-group", "external"] = "external"
 
 
@@ -106,3 +111,14 @@ class Completion(Strict):
             if total > MAX_OUTPUTS or item.get("size") != len(content) or item.get("sha256") != hashlib.sha256(content).hexdigest():
                 raise ValueError("Invalid output digest, size, or total limit")
         return self
+
+
+class LogEvent(Strict):
+    sequence: int = Field(ge=1, le=1000000)
+    stream: Literal['stdout', 'stderr', 'console']
+    text: str = Field(max_length=2048)
+
+
+class LogChunk(Strict):
+    events: list[LogEvent] = Field(max_length=64)
+    truncated: bool = False

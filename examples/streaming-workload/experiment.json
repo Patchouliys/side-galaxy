@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "name": "Streaming progress and output",
+  "requires": {"architectures": ["aarch64", "x86_64"], "os": "linux", "commands": ["python3"]},
+  "setup": [],
+  "run": ["python3", "main.py"],
+  "env": {},
+  "outputs": ["result.json"]
+}

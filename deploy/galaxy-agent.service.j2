@@ -11,7 +11,7 @@ Environment="SG_KVM_DOMAIN={{ galaxy_domain | default('') }}"
 ExecStart=/opt/side-galaxy/venv/bin/sg agent --config /var/lib/side-galaxy/agent.json --state-dir /var/lib/side-galaxy/modules
 Restart=on-failure
 RestartSec=5
-TimeoutStopSec=20
+TimeoutStopSec=90
 KillMode=control-group
 NoNewPrivileges=true
 PrivateTmp=true

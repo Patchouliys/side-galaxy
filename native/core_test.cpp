@@ -289,6 +289,30 @@ int main() {
         restart.good("board_action", reboot);
         require(restart.good("boards")[0].at("quarantined") == 1, "Reboot cleared unrelated preexisting quarantine");
 
+        Fixture queue;
+        enroll(queue);
+        queue.good("submit", submission("queue-active", plan({"alpha"})));
+        auto waiting = submission("queue-first");
+        waiting["enqueue"] = true;
+        auto waiting_batch = queue.good("submit", waiting);
+        require(waiting_batch.at("queue_position") == 1 && waiting_batch.at("runs")[0].at("state") == "waiting",
+                "Busy batch did not wait without a lease");
+        require(waiting_batch.at("runs")[0].at("module_sha256").is_null(), "Waiting work pinned an early generation");
+        require(queue.good("poll", {{"board_id", "beta"}}).is_null(), "Waiting batch reserved only part of its targets");
+        auto retry_without_queue = waiting;
+        retry_without_queue["enqueue"] = false;
+        queue.bad("submit", retry_without_queue, "conflict");
+        queue.bad("submit", submission("queue-jump", plan({"beta"})), "conflict");
+        heartbeat(queue, "beta", 'd');
+        auto queue_active = queue.good("poll", {{"board_id", "alpha"}});
+        queue.good("finish", {{"board_id", "alpha"}, {"run_id", queue_active.at("id")}, {"completion", completion()}});
+        auto released = queue.good("batch", {{"batch_id", waiting_batch.at("id")}});
+        require(released.at("queue_position").is_null(), "Admitted batch retained a queue position");
+        require(released.at("runs")[0].at("state") == "queued" && released.at("runs")[1].at("state") == "queued",
+                "Waiting batch admission was not atomic");
+        require(queue.good("poll", {{"board_id", "beta"}}).at("module_sha256") == std::string(64, 'd'),
+                "Queue dispatch did not pin the latest generation");
+
         Fixture legacy;
         legacy.sql("CREATE TABLE boards (id TEXT PRIMARY KEY,name TEXT NOT NULL,board_profile TEXT NOT NULL,"
                    "system_profile TEXT NOT NULL,token_hash TEXT NOT NULL,description TEXT,seen REAL NOT NULL DEFAULT 0,"

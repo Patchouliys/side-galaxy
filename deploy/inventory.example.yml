@@ -13,6 +13,11 @@ all:
       vars:
         ansible_user: laboperator
         galaxy_system: linux-kvm
+        # Offline hosts need Python venv/pip, SQLite and C++ runtimes preinstalled.
+        # linux-kvm also needs virsh; execution-module runtimes are administrator-provisioned.
+        galaxy_offline: false
+        # Set true above and supply all pinned dependency wheels for the target ABI.
+        # galaxy_wheelhouse: ../.data/wheelhouse/linux-aarch64
         # Build on a compatible Linux distribution for each target architecture.
         galaxy_wheels:
           aarch64: ../dist/side_galaxy-0.1.0-py3-none-linux_aarch64.whl

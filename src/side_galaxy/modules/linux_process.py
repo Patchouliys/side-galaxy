@@ -81,7 +81,9 @@ def workload(plan, request):
             process = subprocess.Popen([sys.executable, str(runner), "--bundle", str(bundle),
                                         "--workspace", str(Path(root) / "work"), "--plan", json.dumps(plan)],
                                        stdout=output, stderr=subprocess.DEVNULL, preexec_fn=limits,
-                                       env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LANG": "C.UTF-8"})
+                                       pass_fds=(int(os.environ['SG_EVENT_FD']),) if os.environ.get('SG_EVENT_FD') else (),
+                                       env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LANG": "C.UTF-8",
+                                            **({'SG_EVENT_FD': os.environ['SG_EVENT_FD']} if os.environ.get('SG_EVENT_FD') else {})})
             deadline, stopping, forced = time.monotonic() + plan["duration_seconds"] + 15, None, False
             try:
                 while process.poll() is None:

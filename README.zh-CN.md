@@ -10,9 +10,10 @@
 ## 功能
 
 - **运行自己的代码：** ZIP 实验包声明准备步骤、启动命令、默认环境和输出文件，每次实验可追加参数、覆盖环境变量。
-- **集中管理多板：** 能力探测、管理核心保留、原子批量准入、逐板租约、幂等提交、取消与恢复。
+- **集中管理多板：** 能力探测、管理核心保留、原子批量准入、持久等待队列、逐目标租约、幂等提交、取消与恢复。
+- **携带离线环境：** 分发准备好的 guest 镜像与依赖，每次实验使用全新写入层，无需重启板子。
 - **配置运行资源：** Linux 进程绑核和地址空间限制；KVM 在线 vCPU 绑核、QEMU Guest Agent 传包执行、统计采集及原配置恢复。
-- **追溯每次实验：** 保存制品与模块摘要、资源计划、退出码、最终日志、输出文件和清理证据。
+- **追溯每次实验：** 保存制品、环境与模块摘要、资源计划、运行中输出、退出码、最终日志、输出文件和清理证据。
 - **连接人与 AI：** Web 控制台、可脚本化 CLI 与 MCP stdio 工具共用 API 和鉴权规则。
 - **批量部署：** 容器化控制服务器，以及面向 Debian 系 Linux 板端代理的 Ansible 部署入口。
 
@@ -56,6 +57,10 @@ uv run sg batches
 
 ## 实验控制
 
+使用 `sg preflight plan.json --enqueue` 和 `sg submit plan.json --enqueue --key experiment-001` 等待忙碌目标。每个执行目标同时运行一个实验，不同目标可并行执行。等待中的批次不占用资源，通过重新检查后一次性获得全部所需租约。控制台默认开启排队；`waiting` 表示等待资源，`queued` 表示已分配资源、等待代理启动。队列位置不是预计等待时间。
+
+使用 `sg logs RUN_ID --follow` 跟踪运行中输出，按 Ctrl+C 停止查看。实时日志限制保留量，并明确提示截断；最终 stdout/stderr 和结果独立于实时传输保存。
+
 `sg reload BOARD_ID` 在当前实验结束后重载；`sg reload BOARD_ID --force` 会先中断实验再重载。控制台提供对应操作与进度、错误反馈。受管 QEMU 支持 `sg lab restart` 和 `sg lab restart --force`，通过 `sg labs` 查看完成状态；重启保留磁盘与设备身份。
 
 演示开关会启动或停止示例代理，隐藏模拟设备及纯模拟历史，不删除记录。CLI 使用 `sg workspace --demo on|off`；`sg serve --demo` 可明确指定以演示模式启动。
@@ -85,9 +90,21 @@ uv run sg artifact-upload .data/hello-workload.zip
 
 在控制台选择上传的版本与目标板卡，或通过 CLI / MCP 提交 JSON 计划。实验代码在已连接的 Linux 代理或配置好的 KVM guest 中运行；计划、依赖、日志与结果下载见[实验指南](docs/workloads.md)。
 
+## 准备离线环境
+
+在 guest 中预装 Python、QEMU Guest Agent 和实验所需工具，然后将环境与实验代码分别打包上传：
+
+```sh
+uv run sg environment-pack prepared-environment --output .data/environment.zip
+uv run sg environment-upload .data/environment.zip
+uv run sg environments
+```
+
+在控制台选择环境，或将其摘要填入实验计划的 `environment_sha256`。`qemu-environment` 目标需要管理员预装 QEMU，并在 Linux 上提供 KVM 访问权限。板子从控制服务器获取包，无需访问互联网。每次运行和复用实验都会创建全新写入层，清理 guest 即可重置，无需重启板子。镜像准备见[环境指南](docs/environments.md)，私有离线部署见[部署指南](docs/operations.md)。首次在物理板已有系统中运行实验可使用 `linux-process`。
+
 ## AI 接入
 
-在兼容 MCP 的客户端中设置运行命令 `sg mcp`，通过环境变量提供 `SG_SERVER` 和 `SG_TOKEN`。默认提供查询与预检；使用 `sg mcp --allow-writes` 和 operator token，可上传制品、提交实验、取消批次或重载模块。
+在兼容 MCP 的客户端中设置运行命令 `sg mcp`，通过环境变量提供 `SG_SERVER` 和 `SG_TOKEN`。默认提供查询与预检，包括 `list_environments` 和 `get_run_logs`。使用 `sg mcp --allow-writes` 和 operator token，可上传实验包或环境包、通过 `run_experiment(..., enqueue=true)` 提交实验、取消批次或重载模块。
 
 ## 文档
 
@@ -97,6 +114,7 @@ uv run sg artifact-upload .data/hello-workload.zip
 - [原生核心构建与打包](docs/native-build.md)
 - [运行、部署与 AI 连接](docs/operations.md)
 - [实验代码、依赖与结果](docs/workloads.md)
+- [准备离线实验环境](docs/environments.md)
 - [Linux / KVM 执行与 guest 配置](docs/kvm-workloads.md)
 - [模块开发与热重载](docs/modules.md)
 - [架构与资源模型](docs/research.md)

@@ -34,6 +34,16 @@ def main(argv=None):
     sub.add_parser("profiles")
     sub.add_parser("batches")
     sub.add_parser("artifacts")
+    sub.add_parser('environments', help='List offline prepared guest packages')
+    env_pack = sub.add_parser('environment-pack', help='Pack a prepared guest environment')
+    env_pack.add_argument('directory')
+    env_pack.add_argument('--output', required=True)
+    env_upload = sub.add_parser('environment-upload', help='Upload a prepared environment ZIP')
+    env_upload.add_argument('bundle')
+    logs = sub.add_parser('logs', help='Read incremental experiment output')
+    logs.add_argument('run')
+    logs.add_argument('--after', type=int, default=0)
+    logs.add_argument('--follow', action='store_true')
     pack = sub.add_parser("pack")
     pack.add_argument("directory")
     pack.add_argument("--output", required=True)
@@ -46,6 +56,7 @@ def main(argv=None):
     for name in ("preflight", "submit"):
         p = sub.add_parser(name)
         p.add_argument("plan", help="JSON file or - for stdin")
+        p.add_argument("--enqueue", action="store_true", help="Wait fairly for targets instead of rejecting occupancy")
         if name == "submit": p.add_argument("--key", required=True, help="Stable idempotency key; reuse on retry")
     for name in ("batch", "cancel", "reload", "recover"):
         p = sub.add_parser(name)
@@ -75,6 +86,10 @@ def main(argv=None):
         if args.command == "lab":
             from .lab_cli import execute
             output(execute(args))
+            return
+        if args.command == 'environment-pack':
+            from .environments import pack_environment
+            output(pack_environment(args.directory, args.output))
             return
         if args.command == "pack":
             from .workload_runner import validate_bundle, MAX_BUNDLE, MAX_EXPANDED
@@ -154,8 +169,24 @@ def main(argv=None):
             if args.command == 'workspace':
                 output(client.request('PUT', '/api/workspace', {'demo': args.demo == 'on'}) if args.demo else client.request('GET', '/api/workspace'))
             elif args.command == 'labs': output(client.request('GET', '/api/labs'))
-            elif args.command in ("boards", "profiles", "batches", "artifacts"):
+            elif args.command in ("boards", "profiles", "batches", "artifacts", "environments"):
                 output(client.request("GET", "/api/" + ("catalog" if args.command == "profiles" else args.command)))
+            elif args.command == 'environment-upload': output(client.upload_environment(args.bundle))
+            elif args.command == 'logs':
+                if args.after < 0: raise ValueError('Log cursor must be nonnegative')
+                cursor = args.after
+                try:
+                    while True:
+                        result = client.request('GET', f'/api/runs/{args.run}/logs?after={cursor}')
+                        if not args.follow:
+                            output(result)
+                            break
+                        for event in result['events']:
+                            print(event['text'], end='', file=sys.stderr if event['stream'] == 'stderr' else sys.stdout, flush=True)
+                        if result['truncated']: print('[live logs truncated]', file=sys.stderr)
+                        cursor = result['next_sequence']
+                        time.sleep(1)
+                except KeyboardInterrupt: pass
             elif args.command in ("artifact-upload", "upload"):
                 from .workload_runner import MAX_BUNDLE, validate_bundle
                 with Path(args.bundle).open("rb") as stream: data = stream.read(MAX_BUNDLE + 1)
@@ -168,7 +199,7 @@ def main(argv=None):
             elif args.command in ("preflight", "submit"):
                 text = sys.stdin.read() if args.plan == "-" else Path(args.plan).read_text()
                 plan = Plan.model_validate_json(text)
-                output(client.request("POST", "/api/preflight" if args.command == "preflight" else "/api/batches", plan.model_dump(), getattr(args, "key", None)))
+                output(client.request("POST", ("/api/preflight" if args.command == "preflight" else "/api/batches") + ("?enqueue=true" if args.enqueue else ""), plan.model_dump(), getattr(args, "key", None)))
             elif args.command == "batch": output(client.request("GET", "/api/batches/" + args.id))
             elif args.command in ("replay", "migrate"):
                 output(client.request("POST", f"/api/batches/{args.id}/replay", {"boards": args.boards}, args.key))

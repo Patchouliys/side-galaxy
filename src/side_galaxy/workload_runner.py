@@ -1,6 +1,7 @@
 """Standalone runner for trusted experiments; directories are not a security sandbox."""
 import argparse
 import base64
+import codecs
 import hashlib
 import io
 import json
@@ -265,6 +266,55 @@ def _read_output(workspace, name, limit):
         os.close(directory)
 
 
+MAX_EVENT_FILE = 1024 * 1024
+
+
+def emit_log(stream, chunk, final=False):
+    """Bounded pipe or guest-file events; final result capture remains independent."""
+    descriptor = os.environ.get('SG_EVENT_FD')
+    event_file = os.environ.get('SG_EVENT_FILE') if not descriptor else None
+    if not descriptor and not event_file: return
+    owned = False
+    try:
+        if event_file:
+            fd = os.open(event_file, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+            owned = True
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode): raise ValueError('Event target must be a regular file')
+            size = info.st_size
+            if not hasattr(emit_log, 'full_files'): emit_log.full_files = set()
+            if (event_file, info.st_ino) in emit_log.full_files: return
+            key = (event_file, stream)
+        else:
+            fd = int(descriptor)
+            key = (fd, stream)
+        if not hasattr(emit_log, 'decoders'): emit_log.decoders = {}
+        decoder = emit_log.decoders.get(key)
+        if decoder is None:
+            decoder = emit_log.decoders[key] = codecs.getincrementaldecoder('utf-8')(errors='replace')
+        text = decoder.decode(chunk, final=final)
+        if final: emit_log.decoders.pop(key, None)
+        for start in range(0, max(len(text), int(final and getattr(emit_log, 'dropped', False))), 256):
+            event = {'stream': stream, 'text': text[start:start+256]}
+            if getattr(emit_log, 'dropped', False): event['truncated'] = True
+            line = (json.dumps(event, ensure_ascii=True) + '\n').encode()
+            if event_file and size + len(line) > MAX_EVENT_FILE - 128:
+                # Reserve one final marker so the reader can distinguish a complete file from truncation.
+                marker = (json.dumps({'stream': stream, 'text': '', 'truncated': True}) + '\n').encode()
+                if size + len(marker) <= MAX_EVENT_FILE: os.write(fd, marker)
+                emit_log.full_files.add((event_file, info.st_ino))
+                emit_log.dropped = True
+                return
+            if os.write(fd, line) != len(line):
+                emit_log.dropped = True
+                return
+            if event_file: size += len(line)
+            emit_log.dropped = False
+    except (OSError, ValueError): emit_log.dropped = True
+    finally:
+        if owned: os.close(fd)
+
+
 def execute(bundle, workspace, seconds, arguments=None, environment=None, artifact_sha256=None):
     result = {'exit_code': 125, 'stdout': '', 'stderr': '', 'outputs': [],
               'cleanup_ok': True, 'cleanup': [], 'steps': [], 'logs_truncated': False}
@@ -287,6 +337,7 @@ def execute(bundle, workspace, seconds, arguments=None, environment=None, artifa
             chunk = os.read(stream.fileno(), 16384)
         except BlockingIOError:
             return True
+        emit_log(key, chunk, final=not chunk)
         counts[key] += len(chunk)
         logs[key].extend(chunk[:max(0, MAX_LOG - len(logs[key]))])
         return bool(chunk)
@@ -359,9 +410,11 @@ def execute(bundle, workspace, seconds, arguments=None, environment=None, artifa
                                     break
                                 if not chunk:
                                     break
+                                emit_log(key, chunk)
                                 counts[key] += len(chunk)
                                 logs[key].extend(chunk[:max(0, MAX_LOG - len(logs[key]))])
                             stream.close()
+                            emit_log(key, b'', final=True)
                         result['exit_code'] = child.poll()
                         result['steps'].append({'phase': phase, 'command': argv[0][:128], 'exit_code': child.returncode})
             check_deadline()
@@ -386,6 +439,7 @@ def execute(bundle, workspace, seconds, arguments=None, environment=None, artifa
         for sig, handler in old.items():
             signal.signal(sig, handler)
         for key in logs:
+            emit_log(key, b'', final=True)
             # UTF-8 replacement characters must not expand the public log past its byte limit.
             encoded = bytes(logs[key]).decode(errors='replace').encode()
             result['logs_truncated'] |= len(encoded) > MAX_LOG

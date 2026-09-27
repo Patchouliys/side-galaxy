@@ -141,6 +141,11 @@ void schema(Database& db) {
     db.execute("CREATE TABLE IF NOT EXISTS workspace_settings (id INTEGER PRIMARY KEY CHECK(id=1),demo INTEGER NOT NULL)");
     db.execute("CREATE TABLE IF NOT EXISTS batches (id TEXT PRIMARY KEY,key TEXT UNIQUE NOT NULL,"
                "plan TEXT NOT NULL,sha256 TEXT NOT NULL,created REAL NOT NULL)");
+    std::set<std::string> batch_columns;
+    for (const auto& column : db.query("PRAGMA table_info(batches)")) batch_columns.insert(column.at("name"));
+    if (!batch_columns.contains("enqueue")) db.execute("ALTER TABLE batches ADD COLUMN enqueue INTEGER NOT NULL DEFAULT 0");
+    if (!batch_columns.contains("admission_contract")) db.execute("ALTER TABLE batches ADD COLUMN admission_contract TEXT");
+    if (!batch_columns.contains("waiting_reason")) db.execute("ALTER TABLE batches ADD COLUMN waiting_reason TEXT");
     db.execute("CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY,"
                "batch_id TEXT NOT NULL REFERENCES batches(id),board_id TEXT NOT NULL REFERENCES boards(id),"
                "state TEXT NOT NULL,created REAL NOT NULL,started REAL,finished REAL,module_sha256 TEXT,result TEXT)");
@@ -228,6 +233,10 @@ void validate_plan(const Json& plan) {
         }
     }
     const auto mode = string_field(plan, "template", 64);
+    if (!plan.value("environment_sha256", Json(nullptr)).is_null()) {
+        hash_field(plan, "environment_sha256");
+        if (mode != "workload") invalid("Environment bundles require workload template");
+    }
     if (!plan.at("duration_seconds").is_number_integer()) invalid("Invalid experiment duration");
     auto duration = plan.at("duration_seconds").get<std::int64_t>();
     if (duration < 1 || duration > (mode == "workload" ? 86400 : 120)) invalid("Invalid experiment duration");
@@ -251,7 +260,11 @@ void expire(Database& db) {
                                     "JOIN batches ba ON ba.id=r.batch_id WHERE r.state IN ('queued','running','cancelling')")) {
         const auto plan = parsed(row.at("plan"));
         const double duration = plan.at("duration_seconds").get<double>();
-        const double grace = plan.at("template") == "workload" ? 180 : 45;
+        // Environment staging can download for 900 s before the execution clock
+        // begins. Allow validation/unpack, 240 s execution overhead and cleanup;
+        // the independent 30 s heartbeat gate still detects disconnected agents.
+        const double grace = !plan.value("environment_sha256", Json(nullptr)).is_null() ? 1800
+            : plan.at("template") == "workload" ? 180 : 45;
         if (timestamp - row.at("seen").get<double>() > 30
             || (!row.at("started").is_null() && timestamp - row.at("started").get<double>() > duration + grace)) {
             db.execute("UPDATE runs SET state=?,finished=?,result=? WHERE id=?",
@@ -263,8 +276,16 @@ void expire(Database& db) {
 }
 
 Json run_view(Json row) {
+    row["queue_position"] = nullptr;
+    row["waiting_reason"] = nullptr;
     row["result"] = parsed(row.at("result"));
     auto& result = row["result"];
+    if (row.at("state") == "lost" && result.is_object() && result.contains("late_completion")
+        && result["late_completion"].is_object()) {
+        auto& late_result = result["late_completion"]["result"];
+        if (late_result.is_object() && late_result.contains("outputs") && late_result["outputs"].is_array())
+            for (auto& item : late_result["outputs"]) if (item.is_object()) item.erase("data_base64");
+    }
     if (result.is_object() && result.contains("outputs") && result["outputs"].is_array()) {
         Json outputs = Json::array();
         for (auto item : result["outputs"]) {
@@ -282,10 +303,22 @@ Json batch_view(Database& db, const Json& batch_id) {
     auto result = db.one("SELECT * FROM batches WHERE id=?", {batch_id});
     if (result.is_null()) missing();
     result.erase("key");
+    result.erase("admission_contract");
+    const auto waiting = db.one("SELECT 1 FROM runs WHERE batch_id=? AND state='waiting'", {batch_id});
+    result["queue_position"] = waiting.is_null() ? Json(nullptr) : db.one(
+        "SELECT COUNT(*) AS position FROM batches b WHERE b.rowid <= (SELECT rowid FROM batches WHERE id=?) "
+        "AND EXISTS(SELECT 1 FROM runs r WHERE r.batch_id=b.id AND r.state='waiting')", {batch_id}).at("position");
+    if (waiting.is_null()) result["waiting_reason"] = nullptr;
     result["plan"] = parsed(result.at("plan"));
     result["runs"] = Json::array();
-    for (auto& row : db.query("SELECT * FROM runs WHERE batch_id=? ORDER BY created,id", {batch_id}))
-        result["runs"].push_back(run_view(std::move(row)));
+    for (auto& row : db.query("SELECT * FROM runs WHERE batch_id=? ORDER BY created,id", {batch_id})) {
+        auto run = run_view(std::move(row));
+        if (run.at("state") == "waiting") {
+            run["queue_position"] = result.at("queue_position");
+            run["waiting_reason"] = result.at("waiting_reason");
+        }
+        result["runs"].push_back(std::move(run));
+    }
     return result;
 }
 
@@ -316,13 +349,16 @@ void check_environment(Json& reasons, const Json& requirements, const Json& desc
     }
 }
 
-Json check_plan(Database& db, const Json& payload) {
+Json check_plan(Database& db, const Json& payload, bool allow_wait = false) {
     const auto& plan = payload.at("plan");
     const auto plan_hash = hash_field(payload, "plan_sha256");
     validate_plan(plan);
     Json errors = Json::array(), targets = Json::array();
     if (!plan.value("artifact_sha256", Json(nullptr)).is_null() && !payload.value("artifact_available", false))
         errors.push_back({{"board_id", nullptr}, {"reasons", Json::array({"artifact unavailable; upload again"})}});
+    const bool environment_bundle = !plan.value("environment_sha256", Json(nullptr)).is_null();
+    if (environment_bundle && !payload.value("environment_available", false))
+        errors.push_back({{"board_id", nullptr}, {"reasons", Json::array({"environment unavailable; upload again"})}});
     const double timestamp = now();
     const bool demo = demo_enabled(db);
     Json cores = plan.at("cpus");
@@ -339,11 +375,20 @@ Json check_plan(Database& db, const Json& payload) {
         }
         const auto description = parsed(board.at("description"), Json::object());
         if (!demo && synthetic_board(board)) reasons.push_back("demo mode disabled; synthetic admission is blocked");
-        if (!board.at("maintenance").is_null()) reasons.push_back("board restart maintenance is pending");
-        if (reload_pending(board)) reasons.push_back("module reload pending or failed; await a successful acknowledgement");
-        if (timestamp - board.at("seen").get<double>() > 30) reasons.push_back("board offline");
-        if (board.at("quarantined").get<int>()) reasons.push_back("board quarantined; verify cleanup before recovery");
-        if (board.at("occupied").get<int>()) reasons.push_back("board lease occupied");
+        if (!allow_wait) {
+            if (!board.at("maintenance").is_null()) reasons.push_back("board restart maintenance is pending");
+            if (reload_pending(board)) reasons.push_back("module reload pending or failed; await a successful acknowledgement");
+            if (timestamp - board.at("seen").get<double>() > 30) reasons.push_back("board offline");
+            if (board.at("quarantined").get<int>()) reasons.push_back("board quarantined; verify cleanup before recovery");
+            if (board.at("occupied").get<int>()) reasons.push_back("board lease occupied");
+        }
+        // An enrolled, never-connected target has no capabilities to validate yet.
+        // It may wait, but admission always requires its first validated description.
+        if (allow_wait && description.empty()) {
+            if (!reasons.empty()) errors.push_back({{"board_id", board_id}, {"reasons", std::move(reasons)}});
+            targets.push_back({{"board_id", board_id}, {"name", board.at("name")}, {"mode", nullptr}, {"module_sha256", nullptr}});
+            continue;
+        }
         bool unavailable = false, reserved = false;
         const auto available_cores = description.value("cpus", Json::array());
         const auto reserved_cores = description.value("reserved_cpus", Json::array());
@@ -355,6 +400,13 @@ Json check_plan(Database& db, const Json& payload) {
         if (reserved) reasons.push_back("management CPU reserved");
         if (!contains(description.value("templates", Json::array()), plan.at("template"))) reasons.push_back("template unsupported");
         const auto caps = description.value("capabilities", Json::array());
+        if (description.value("environment_required", false) && !environment_bundle)
+            reasons.push_back("module requires an environment bundle");
+        if (environment_bundle) {
+            if (!contains(caps, "environment-bundle")) reasons.push_back("module does not support environment bundles");
+            if (!contains(description.value("environment_architectures", Json::array()), payload.value("environment_architecture", Json(nullptr))))
+                reasons.push_back("environment architecture unsupported by target");
+        }
         if (!contains(caps, "cpu-affinity")) reasons.push_back("CPU affinity unsupported");
         const auto memory = plan.value("memory_mib", Json(nullptr));
         if (memory.is_null() && description.value("memory_limit_required", false)) reasons.push_back("module requires a memory limit");
@@ -363,13 +415,66 @@ Json check_plan(Database& db, const Json& payload) {
         if (!plan.value("bandwidth_percent", Json(nullptr)).is_null() && !contains(caps, "bandwidth-limit"))
             reasons.push_back("hardware bandwidth control unsupported");
         if (!plan.at("interference_cpus").empty() && !contains(caps, "interference")) reasons.push_back("module does not support interferers");
-        if (plan.at("template") == "workload")
-            check_environment(reasons, payload.value("artifact_requirements", Json::object()), description);
+        if (plan.at("template") == "workload") {
+            auto execution_description = description;
+            if (environment_bundle) execution_description["execution_environment"] = payload.value("environment_runtime", Json(nullptr));
+            check_environment(reasons, payload.value("artifact_requirements", Json::object()), execution_description);
+        }
         if (!reasons.empty()) errors.push_back({{"board_id", board_id}, {"reasons", std::move(reasons)}});
         targets.push_back({{"board_id", board_id}, {"name", board.at("name")}, {"mode", description.value("mode", Json(nullptr))},
                            {"module_sha256", description.value("module_sha256", Json(nullptr))}});
     }
     return {{"valid", errors.empty()}, {"errors", std::move(errors)}, {"targets", std::move(targets)}, {"plan_sha256", plan_hash}};
+}
+
+std::string waiting_reason(const Json& checked) {
+    std::set<std::string> seen;
+    std::string message;
+    for (const auto& error : checked.at("errors"))
+        for (const auto& reason : error.at("reasons")) {
+            const auto text = reason.get<std::string>();
+            if (seen.insert(text).second) {
+                if (!message.empty()) message += "; ";
+                message += text;
+            }
+        }
+    return message;
+}
+
+bool waiting_overlap(Database& db, const Json& plan) {
+    for (const auto& board : plan.at("boards"))
+        if (!db.one("SELECT 1 FROM runs WHERE board_id=? AND state='waiting' LIMIT 1", {board}).is_null()) return true;
+    return false;
+}
+
+void dispatch_waiting(Database& db) {
+    // ponytail: one bounded FIFO pass per transaction; no scheduler thread or second queue database.
+    std::set<std::string> blocked;
+    for (const auto& batch : db.query("SELECT b.id,b.admission_contract FROM batches b "
+                                     "WHERE EXISTS(SELECT 1 FROM runs r WHERE r.batch_id=b.id AND r.state='waiting') ORDER BY b.rowid")) {
+        const auto contract = parsed(batch.at("admission_contract"));
+        const auto& boards = contract.at("plan").at("boards");
+        const auto compatible = check_plan(db, contract, true);
+        if (!compatible.at("valid").get<bool>()) {
+            db.execute("UPDATE runs SET state='failed',finished=?,result=? WHERE batch_id=? AND state='waiting'",
+                       {now(), Json{{"error", waiting_reason(compatible)}, {"code_executed", false}, {"cleanup_ok", true}}.dump(), batch.at("id")});
+            db.execute("UPDATE batches SET waiting_reason=NULL WHERE id=?", {batch.at("id")});
+            continue;
+        }
+        bool earlier = false;
+        for (const auto& board : boards) earlier |= blocked.contains(board.get<std::string>());
+        const auto checked = check_plan(db, contract);
+        if (earlier || !checked.at("valid").get<bool>()) {
+            for (const auto& board : boards) blocked.insert(board.get<std::string>());
+            db.execute("UPDATE batches SET waiting_reason=? WHERE id=?",
+                       {earlier ? "Earlier waiting batch shares a target" : waiting_reason(checked), batch.at("id")});
+            continue;
+        }
+        for (const auto& target : checked.at("targets"))
+            db.execute("UPDATE runs SET state='queued',module_sha256=? WHERE batch_id=? AND board_id=? AND state='waiting'",
+                       {target.at("module_sha256"), batch.at("id"), target.at("board_id")});
+        db.execute("UPDATE batches SET waiting_reason=NULL WHERE id=?", {batch.at("id")});
+    }
 }
 
 Json dispatch(Database& db, const std::string& operation, const Json& payload) {
@@ -408,10 +513,13 @@ Json dispatch(Database& db, const std::string& operation, const Json& payload) {
                    {description.dump(), now(), heartbeat.value("reload_ack", 0), heartbeat.value("reload_error", Json(nullptr)), id});
         auto result = db.one("SELECT reload_requested,quarantined FROM boards WHERE id=?", {id});
         if (result.is_null()) missing();
+        expire(db);
+        dispatch_waiting(db);
         return result;
     }
     if (operation == "boards") {
         expire(db);
+        dispatch_waiting(db);
         Json result = Json::array();
         const double timestamp = now();
         for (auto board : db.query("SELECT b.*,r.id AS active_run FROM boards b LEFT JOIN runs r ON b.id=r.board_id "
@@ -429,19 +537,37 @@ Json dispatch(Database& db, const std::string& operation, const Json& payload) {
     }
     if (operation == "preflight") {
         expire(db);
-        return check_plan(db, payload);
+        dispatch_waiting(db);
+        const bool enqueue = payload.value("enqueue", false);
+        auto checked = check_plan(db, payload, enqueue);
+        const bool overlap = waiting_overlap(db, payload.at("plan"));
+        const auto ready = check_plan(db, payload);
+        checked["queueable"] = enqueue && checked.at("valid").get<bool>();
+        checked["waiting_reason"] = overlap ? Json("Earlier waiting batch shares a target")
+            : ready.at("valid").get<bool>() ? Json(nullptr) : Json(waiting_reason(ready));
+        if (!enqueue && overlap) {
+            checked["valid"] = false;
+            checked["errors"].push_back({{"board_id", nullptr}, {"reasons", {"Earlier waiting batch shares a target"}}});
+        }
+        return checked;
     }
     if (operation == "submit") {
         expire(db);
+        dispatch_waiting(db);
         const auto key = string_field(payload, "key", 128);
         const auto plan_hash = hash_field(payload, "plan_sha256");
-        const auto previous = db.one("SELECT id,sha256 FROM batches WHERE key=?", {key});
+        const bool enqueue = payload.value("enqueue", false);
+        const auto previous = db.one("SELECT id,sha256,enqueue FROM batches WHERE key=?", {key});
         if (!previous.is_null()) {
-            if (previous.at("sha256") != plan_hash) conflict("Idempotency key belongs to a different plan");
+            if (previous.at("sha256") != plan_hash || (previous.at("enqueue").get<int>() != 0) != enqueue)
+                conflict("Idempotency key belongs to a different plan or queue intent");
             return batch_view(db, previous.at("id"));
         }
-        const auto checked = check_plan(db, payload);
+        const auto checked = check_plan(db, payload, enqueue);
         if (!checked.at("valid").get<bool>()) conflict(checked.dump());
+        if (!enqueue && waiting_overlap(db, payload.at("plan"))) conflict("Earlier waiting batch shares a target");
+        if (enqueue && db.one("SELECT COUNT(DISTINCT batch_id) AS count FROM runs WHERE state='waiting'").at("count").get<int>() >= 256)
+            conflict("Waiting queue is full (256 batches)");
         const auto id = string_field(payload, "batch_id");
         const auto& runs = payload.at("run_ids");
         const auto& targets = checked.at("targets");
@@ -452,19 +578,25 @@ Json dispatch(Database& db, const std::string& operation, const Json& payload) {
                 || !unique_runs.insert(run.get<std::string>()).second) invalid("Invalid or duplicate run ID");
         }
         const double timestamp = now();
-        db.execute("INSERT INTO batches(id,key,plan,sha256,created) VALUES(?,?,?,?,?)",
-                   {id, key, payload.at("plan").dump(), plan_hash, timestamp});
+        auto contract = payload;
+        for (const auto* field : {"key", "batch_id", "run_ids", "enqueue"}) contract.erase(field);
+        db.execute("INSERT INTO batches(id,key,plan,sha256,created,enqueue,admission_contract) VALUES(?,?,?,?,?,?,?)",
+                   {id, key, payload.at("plan").dump(), plan_hash, timestamp, enqueue, contract.dump()});
         for (std::size_t index = 0; index < targets.size(); ++index)
             db.execute("INSERT INTO runs(id,batch_id,board_id,state,created,module_sha256) VALUES(?,?,?,?,?,?)",
-                       {runs[index], id, targets[index].at("board_id"), "queued", timestamp, targets[index].at("module_sha256")});
+                       {runs[index], id, targets[index].at("board_id"), enqueue ? "waiting" : "queued", timestamp,
+                        enqueue ? Json(nullptr) : targets[index].at("module_sha256")});
+        if (enqueue) dispatch_waiting(db);
         return batch_view(db, id);
     }
     if (operation == "batch") {
         expire(db);
+        dispatch_waiting(db);
         return batch_view(db, string_field(payload, "batch_id"));
     }
     if (operation == "batches") {
         expire(db);
+        dispatch_waiting(db);
         Json result = Json::array();
         const char* query = payload.value("real_only", false)
             ? "SELECT b.id FROM batches b WHERE EXISTS(SELECT 1 FROM runs r JOIN boards d ON d.id=r.board_id "
@@ -477,6 +609,7 @@ Json dispatch(Database& db, const std::string& operation, const Json& payload) {
     }
     if (operation == "poll") {
         expire(db);
+        dispatch_waiting(db);
         const auto id = string_field(payload, "board_id");
         const auto board = db.one("SELECT * FROM boards WHERE id=?", {id});
         if (board.is_null()) return nullptr;
@@ -509,14 +642,24 @@ Json dispatch(Database& db, const std::string& operation, const Json& payload) {
         auto row = db.one("SELECT * FROM runs WHERE id=? AND board_id=?", {id, string_field(payload, "board_id")});
         if (row.is_null()) missing();
         const auto& completion = payload.at("completion");
-        if (row.at("state") == "queued") conflict("Run must be claimed before completion");
+        if (row.at("state") == "queued" || row.at("state") == "waiting") conflict("Run must be claimed before completion");
         if (hash_field(completion, "module_sha256") != row.at("module_sha256").get<std::string>()) conflict("Module generation mismatch");
         const auto state = row.at("state").get<std::string>();
-        if (state == "succeeded" || state == "failed" || state == "cancelled" || state == "lost") return run_view(std::move(row));
+        if (state == "succeeded" || state == "failed" || state == "cancelled") return run_view(std::move(row));
         const bool clean = completion.at("cleanup_ok").get<bool>();
         auto final_state = string_field(completion, "state", 16);
         if (final_state != "succeeded" && final_state != "failed" && final_state != "cancelled") invalid("Invalid completion state");
         if (!completion.at("result").is_object()) invalid("Completion result must be an object");
+        if (state == "lost") {
+            auto evidence = parsed(row.at("result"), Json::object());
+            if (!evidence.contains("late_completion")) {
+                evidence["late_completion"] = completion;
+                evidence["late_completion"]["received"] = now();
+                db.execute("UPDATE runs SET result=? WHERE id=?", {evidence.dump(), id});
+            }
+            // Retain execution evidence without treating late arrival as administrative recovery.
+            return run_view(db.one("SELECT * FROM runs WHERE id=?", {id}));
+        }
         if (state == "cancelling" && clean) final_state = "cancelled";
         if (!clean) {
             final_state = "failed";
@@ -524,14 +667,18 @@ Json dispatch(Database& db, const std::string& operation, const Json& payload) {
         }
         db.execute("UPDATE runs SET state=?,finished=?,result=? WHERE id=?",
                    {final_state, now(), completion.at("result").dump(), id});
+        dispatch_waiting(db);
         return run_view(db.one("SELECT * FROM runs WHERE id=?", {id}));
     }
     if (operation == "cancel") {
         const auto id = string_field(payload, "batch_id");
         if (db.one("SELECT 1 FROM batches WHERE id=?", {id}).is_null()) missing();
-        db.execute("UPDATE runs SET state='cancelled',finished=? WHERE batch_id=? AND state='queued'", {now(), id});
+        db.execute("UPDATE runs SET state='cancelled',finished=?,result=? WHERE batch_id=? AND state IN ('waiting','queued')",
+                   {now(), Json{{"code_executed", false}, {"cleanup_ok", true}}.dump(), id});
+        db.execute("UPDATE batches SET waiting_reason=NULL WHERE id=?", {id});
         db.execute("UPDATE runs SET state='cancelling' WHERE batch_id=? AND state='running'", {id});
         expire(db);
+        dispatch_waiting(db);
         return batch_view(db, id);
     }
     if (operation == "board_action") {
@@ -589,6 +736,7 @@ Json dispatch(Database& db, const std::string& operation, const Json& payload) {
             return {{"board_id", id}, {"action", action}, {"restart_id", maintenance.at("restart_id")}, {"cleanup", evidence},
                     {"quarantined", maintenance.at("previous_quarantined")}};
         } else invalid("Unknown board action");
+        dispatch_waiting(db);
         return {{"board_id", id}, {"action", action}};
     }
     invalid("Unknown core operation");
